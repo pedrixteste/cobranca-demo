@@ -1,0 +1,11 @@
+credentials.json
+.streamlit/secrets.toml
+# Pega também cópias como secrets.toml.bak / .old — um backup do secrets
+# carrega a chave privada inteira.
+.streamlit/secrets.toml*
+*.bak
+__pycache__/
+*.pyc
+.env
+# Arquivo do modo de teste local (COBRANCA_LOCAL)
+*.local.json

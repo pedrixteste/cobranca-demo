@@ -1,0 +1,265 @@
+/* ── Visual do app de cobranças ────────────────────────────────────────────────
+   Mesma família do app de contas (boleto-tracker), com outra cor principal
+   (azul-tinta) para não confundir os dois no celular.
+   Conceito: cada parcela é uma folha de CARNÊ (bloco da data à esquerda) e a
+   paga leva um carimbo PAGO / PASSOU.
+   Cores de situação (iguais em parcela, cliente e resumo):
+     verde  = pago / em dia     cinza   = em aberto, ainda não venceu
+     amarelo = vence em breve   vermelho = atrasado */
+
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
+
+:root {
+    --tinta:   #1B2A3A;
+    --apoio:   #5E6B75;
+    --papel:   #EFF1F5;
+    --cartao:  #FFFFFF;
+    --linha:   #D9DFE7;
+    --marca:   #1F3A5F;
+    --marca-2: #152A45;
+    --ok:      #1E8A5A;  --ok-bg:     #DFF1E7;  --ok-leve:     #F1FAF5;
+    --atraso:  #C4432B;  --atraso-bg: #F7E3DF;  --atraso-leve: #FDF3F0;
+    --breve:   #9A6512;  --breve-bg:  #FBEFD9;  --breve-leve:  #FFF9EE;  --breve-cor: #D69A2D;
+    --neutro:  #5E6B75;  --neutro-bg: #E9EDF1;
+    --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
+    --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono:    'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+header[data-testid="stHeader"] { display: none; }
+.block-container { padding-top: 1.1rem !important; padding-bottom: 4rem; max-width: 560px; }
+
+.stApp, .stApp p, .stApp label, .stApp input, .stApp textarea, .stApp button, .stApp li {
+    font-family: var(--texto);
+}
+.stButton button { min-height: 2.8rem; border-radius: 12px; font-weight: 600; }
+.stButton button p { font-weight: 600; }
+
+/* No celular o Streamlit empilha as colunas; aqui elas ficam lado a lado. */
+@media (max-width: 640px) {
+    [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: .45rem !important; }
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] { min-width: 0 !important; }
+}
+@media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+}
+
+/* ── Títulos e caixas de texto ───────────────────────────────────────────── */
+
+.st-key-voltar_topo button { min-height: 2rem; padding: 0; color: var(--apoio); }
+.cx-titulo { font-family: var(--display); font-weight: 800; font-size: 1.6rem; letter-spacing: -.02em;
+             color: var(--tinta); line-height: 1.08; margin: 0 0 .15rem; overflow-wrap: anywhere; }
+.cx-sub    { color: var(--apoio); font-size: .95rem; margin-bottom: .6rem; }
+.cx-info, .cx-ok, .cx-perigo, .cx-nota { border-radius: 12px; padding: 10px 12px; font-size: .9rem;
+                                          margin: 4px 0 6px; line-height: 1.45; }
+.cx-info   { background: #E3E9F2; color: var(--marca-2); }
+.cx-ok     { background: var(--ok-bg); color: #145E3D; }
+.cx-perigo { background: var(--atraso-bg); color: #8E2A18; }
+.cx-nota   { background: transparent; border: 1px dashed var(--linha); color: var(--apoio); font-size: .84rem; }
+.cx-divisa { border-top: 1px solid var(--linha); margin: 10px 0 2px; }
+.cx-vazio  { text-align: center; color: var(--apoio); padding: 28px 12px; font-size: .95rem; }
+
+/* ── Tela inicial e escolha Pix/Cartão ───────────────────────────────────── */
+
+.hm-data  { font-family: var(--mono); font-size: .74rem; font-weight: 600; letter-spacing: .08em;
+            text-transform: uppercase; color: var(--apoio); margin-top: .6rem; }
+.hm-marca { font-family: var(--display); font-weight: 800; font-size: 2.15rem; letter-spacing: -.03em;
+            color: var(--tinta); line-height: 1; margin: .2rem 0 1rem; }
+
+[class*="st-key-hm_"] { margin-bottom: .75rem; }
+
+/* Cartão inteiro tocável: o botão invisível (chave tq_*) cobre o cartão TODO.
+   Toda div dentro dele estica (height/width 100%): sem isso o botão ficava só
+   no canto de cima e o toque no meio do cartão não fazia nada (erro do boleto). */
+[class*="st-key-hm_"], [class*="st-key-cc_"] { position: relative; }
+[class*="st-key-tq_"] {
+    position: absolute !important; top: 0; left: 0; right: 0; bottom: -1rem;
+    width: auto !important; height: auto !important; z-index: 3; margin: 0 !important;
+}
+[class*="st-key-tq_"] div, [class*="st-key-tq_"] button {
+    width: 100% !important; height: 100% !important; max-width: none !important;
+}
+[class*="st-key-tq_"] button { opacity: 0; cursor: pointer; }
+[class*="st-key-hm_"]:has(button:active) .hm-card,
+[class*="st-key-cc_"]:has(button:active) .cc { transform: scale(.98); }
+[class*="st-key-hm_"]:has(button:focus-visible) .hm-card,
+[class*="st-key-cc_"]:has(button:focus-visible) .cc { outline: 3px solid var(--marca); outline-offset: 2px; }
+
+.hm-card  { display: flex; gap: 14px; align-items: center; border-radius: 22px;
+            padding: 18px 16px; min-height: 110px; transition: transform .12s ease; }
+.hm-card.claro  { background: var(--cartao); border: 1px solid var(--linha); color: var(--tinta); }
+.hm-card.escuro { background: var(--marca); color: #fff; }
+.hm-ico   { width: 50px; height: 50px; border-radius: 15px; display: grid; place-items: center; flex: none; }
+.hm-ico svg { width: 26px; height: 26px; }
+.claro  .hm-ico { background: #E3E9F2; color: var(--marca); }
+.escuro .hm-ico { background: rgba(255,255,255,.13); color: #fff; }
+.hm-txt   { flex: 1; min-width: 0; }
+.hm-tit   { font-family: var(--display); font-weight: 800; font-size: 1.25rem; letter-spacing: -.01em; line-height: 1.1; }
+.hm-desc  { font-size: .9rem; opacity: .75; margin-top: 3px; }
+.hm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.hm-chip  { font-size: .78rem; font-weight: 600; padding: 4px 10px; border-radius: 99px;
+            background: rgba(255,255,255,.15); color: #fff; }
+.hm-chip.atraso { background: #F6D3CC; color: #8E2A18; }
+.hm-seta  { flex: none; opacity: .45; }
+.hm-seta svg { width: 22px; height: 22px; }
+.st-key-btn_excluidas button { color: var(--apoio); }
+
+/* ── Formulários em blocos numerados ─────────────────────────────────────── */
+
+[class*="st-key-sec_"] { background: var(--cartao); border: 1px solid var(--linha);
+                         border-radius: 18px; padding: 14px 14px 16px; }
+.sec-tit  { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--tinta);
+            font-size: 1rem; margin-bottom: 2px; }
+.sec-tit span { width: 24px; height: 24px; border-radius: 50%; background: var(--marca); color: #fff;
+                font-family: var(--mono); font-size: .75rem; display: grid; place-items: center; }
+.px-lista { font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+            color: var(--apoio); margin: .5rem 0 -.2rem; }
+[class*="st-key-px_linha_"], [class*="st-key-ct_linha_"] {
+    border-left: 3px solid var(--linha); padding-left: 10px; }
+
+/* ── Cores de situação (chips) ───────────────────────────────────────────── */
+
+.sit { font-size: .72rem; font-weight: 700; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
+.sit.c-ok     { background: var(--ok-bg);     color: var(--ok); }
+.sit.c-atraso { background: var(--atraso);    color: #fff; }
+.sit.c-breve  { background: var(--breve-bg);  color: var(--breve); }
+.sit.c-neutro { background: var(--neutro-bg); color: var(--neutro); }
+
+.pg   { height: 7px; background: var(--neutro-bg); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
+.pg i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
+
+/* ── Relatório ───────────────────────────────────────────────────────────── */
+
+.rs     { display: flex; background: var(--cartao); border: 1px solid var(--linha);
+          border-radius: 16px; margin: 4px 0 10px; overflow: hidden; }
+.rs-it  { flex: 1; padding: 10px 11px; border-left: 1px solid var(--linha); min-width: 0; }
+.rs-it:first-child { border-left: 0; }
+.rs-it b    { display: block; font-family: var(--texto); font-weight: 800; font-size: 1.02rem; line-height: 1.1;
+              font-variant-numeric: tabular-nums; white-space: nowrap; letter-spacing: -.01em; }
+.rs-it b small { font-size: .68rem; font-weight: 700; margin-right: 2px; }
+.rs-it span { display: block; font-size: .74rem; font-weight: 700; margin-top: 4px; }
+.rs-it em   { display: block; font-style: normal; font-size: .7rem; color: var(--apoio); margin-top: 1px; }
+.rs-it.c-ok b, .rs-it.c-ok span         { color: var(--ok); }
+.rs-it.c-neutro b, .rs-it.c-neutro span { color: var(--tinta); }
+.rs-it.c-atraso b, .rs-it.c-atraso span { color: var(--atraso); }
+
+.rl-cont { font-family: var(--mono); font-size: .74rem; font-weight: 600; letter-spacing: .06em;
+           text-transform: uppercase; color: var(--apoio); margin: 4px 0 2px; }
+.ag-dia  { font-family: var(--display); font-weight: 800; font-size: 1.05rem; color: var(--tinta);
+           margin: 14px 0 -2px; text-transform: capitalize; }
+.ag-dia.atraso { color: var(--atraso); }
+
+/* Cartão do cliente */
+[class*="st-key-cc_"] { margin-top: .15rem; }
+.cc { background: var(--cartao); border: 1px solid var(--linha); border-left: 6px solid var(--neutro);
+      border-radius: 18px; padding: 12px 14px 12px; position: relative; transition: transform .12s ease; }
+.cc.c-ok     { border-left-color: var(--ok); }
+.cc.c-breve  { border-left-color: var(--breve-cor); background: var(--breve-leve); }
+.cc.c-atraso { border-left-color: var(--atraso); border-color: var(--atraso); background: var(--atraso-leve); }
+.cc-topo  { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.cc-turma { font-family: var(--mono); font-size: .68rem; font-weight: 600; letter-spacing: .07em;
+            text-transform: uppercase; color: var(--apoio); white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; min-width: 0; }
+.cc-nome  { font-weight: 700; font-size: 1.08rem; color: var(--tinta); line-height: 1.25;
+            margin-top: 3px; overflow-wrap: anywhere; }
+.cc.c-atraso .cc-nome { color: var(--atraso); }
+.cc-val   { font-size: .84rem; color: var(--apoio); }
+.cc-val b { font-family: var(--mono); font-weight: 600; color: var(--tinta); }
+.cc-est   { font-size: .86rem; color: var(--tinta); margin-top: 2px; }
+.cc.c-atraso .cc-est { color: #8E2A18; }
+.cc-selo  { position: absolute; right: 12px; top: 10px; transform: rotate(-7deg);
+            border: 2.5px solid var(--ok); color: var(--ok); border-radius: 8px; padding: 1px 8px;
+            font-family: var(--mono); font-weight: 700; font-size: .8rem; letter-spacing: .14em;
+            background: rgba(255,255,255,.85); }
+
+/* ── Folha de carnê (parcela) ────────────────────────────────────────────── */
+
+[class*="st-key-pc_"] { background: var(--cartao); border: 1px solid var(--linha); border-left: 6px solid var(--neutro);
+                        border-radius: 16px; padding: 12px 12px 10px; gap: .5rem !important; }
+[class*="st-key-pc_"]:has(.pc.c-ok)     { border-color: var(--ok);     border-left-color: var(--ok);     background: var(--ok-leve); }
+[class*="st-key-pc_"]:has(.pc.c-breve)  { border-left-color: var(--breve-cor); background: var(--breve-leve); }
+[class*="st-key-pc_"]:has(.pc.c-atraso) { border-color: var(--atraso); border-left-color: var(--atraso); background: var(--atraso-leve); }
+
+/* margin-bottom: o markdown do Streamlit "come" 1rem embaixo e os botões encostavam no valor */
+.pc       { display: flex; gap: 12px; position: relative; margin-bottom: 1rem; }
+.pc-data  { width: 56px; flex: none; border-radius: 12px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; padding: 7px 0; font-family: var(--mono);
+            background: var(--neutro-bg); color: var(--neutro); }
+.pc-mes   { font-size: .64rem; font-weight: 700; letter-spacing: .1em; }
+.pc-dia   { font-family: var(--display); font-weight: 800; font-size: 1.5rem; line-height: 1; margin: 2px 0 1px; }
+.pc-sem   { font-size: .64rem; font-weight: 600; }
+.pc.c-ok .pc-data     { background: var(--ok); color: #fff; }
+.pc.c-atraso .pc-data { background: var(--atraso); color: #fff; }
+.pc.c-breve .pc-data  { background: var(--breve-cor); color: #fff; }
+
+.pc-corpo { flex: 1; min-width: 0; }
+.pc-topo  { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pc-tag   { font-family: var(--mono); font-size: .66rem; font-weight: 600; letter-spacing: .08em;
+            text-transform: uppercase; color: var(--apoio); white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; min-width: 0; }
+.pc-nome  { font-weight: 700; font-size: 1rem; color: var(--tinta); line-height: 1.25; margin-top: 2px;
+            overflow-wrap: anywhere; }
+.pc-rot   { font-size: .86rem; color: var(--apoio); margin-top: 2px; }
+.pc-valor { font-family: var(--mono); font-weight: 600; font-size: 1.05rem; color: var(--tinta); }
+.pc.pago .pc-rot, .pc.pago .pc-valor { padding-right: 84px; }
+.pc-carimbo { position: absolute; right: 0; bottom: -2px; transform: rotate(-9deg);
+              border: 2.5px solid var(--ok); color: var(--ok); border-radius: 8px;
+              padding: 1px 8px 3px; font-family: var(--mono); font-weight: 700; font-size: .95rem;
+              letter-spacing: .14em; text-align: center; line-height: 1.1; background: rgba(255,255,255,.85); }
+.pc-carimbo small { display: block; font-size: .6rem; letter-spacing: .04em; font-weight: 600; }
+
+[class*="st-key-pc_"] .stButton button { min-height: 2.5rem; padding: 0 .3rem; }
+[class*="st-key-pc_"] .stButton button p { font-size: .8rem; white-space: nowrap; }
+/* Cartão estreito (letra Grande em celular pequeno): ícone em cima do texto */
+[class*="st-key-pc_"] { container-type: inline-size; }
+@container (max-width: 340px) {
+    [class*="st-key-pc_"] .stButton button { min-height: 3rem; padding: .2rem .1rem; }
+    [class*="st-key-pc_"] .stButton button > div,
+    [class*="st-key-pc_"] .stButton button > span { flex-direction: column; gap: 0; }
+    [class*="st-key-pc_"] .stButton button span:has(> span > [data-testid="stIconMaterial"]),
+    [class*="st-key-pc_"] .stButton button span:has(> [data-testid="stIconMaterial"]) { margin: 0 !important; }
+    [class*="st-key-pc_"] .stButton button p { font-size: .74rem; }
+}
+
+/* ── Ficha do cliente ────────────────────────────────────────────────────── */
+
+.fc { background: var(--cartao); border: 1px solid var(--linha); border-left: 6px solid var(--neutro);
+      border-radius: 18px; padding: 12px 14px; margin: 2px 0 8px; }
+.fc.c-ok     { border-left-color: var(--ok); }
+.fc.c-breve  { border-left-color: var(--breve-cor); }
+.fc.c-atraso { border-left-color: var(--atraso); border-color: var(--atraso); }
+.fc-topo { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+           font-size: .84rem; color: var(--apoio); }
+.fc-nums { display: flex; gap: 8px; }
+.fc-nums div { flex: 1; min-width: 0; }
+.fc-nums b { display: block; font-family: var(--mono); font-weight: 700; font-size: .98rem; color: var(--tinta);
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fc-nums span { font-size: .74rem; font-weight: 700; color: var(--apoio); }
+.fc-nums div:first-child b, .fc-nums div:first-child span { color: var(--ok); }
+.fc-nums .atr b, .fc-nums .atr span { color: var(--atraso); }
+.fc-aviso { margin-top: 8px; font-size: .8rem; color: var(--breve); }
+
+.dl-cab { margin-bottom: 6px; }
+.dl-cab b { display: block; font-size: 1.05rem; color: var(--tinta); }
+.dl-cab span { font-size: .86rem; color: var(--apoio); }
+
+/* ── Cobranças excluídas ─────────────────────────────────────────────────── */
+
+[class*="st-key-lx_"] { background: var(--cartao); border: 1px solid var(--linha); border-radius: 16px;
+                        padding: 11px 13px 12px; gap: .4rem !important; }
+.lx-nome  { font-weight: 700; color: var(--tinta); line-height: 1.25; }
+.lx-meta  { font-size: .82rem; color: var(--apoio); margin-top: 3px; }
+.lx-prazo { font-family: var(--mono); font-size: .72rem; color: var(--apoio); margin-top: 4px; }
+
+/* ── Anexar arquivo em português ─────────────────────────────────────────── */
+
+[data-testid="stFileUploaderDropzoneInstructions"] span,
+[data-testid="stFileUploaderDropzoneInstructions"] small { display: none; }
+[data-testid="stFileUploaderDropzoneInstructions"] > div::after {
+    content: "PDF ou foto, até 10 MB"; font-size: .8rem; color: var(--apoio);
+}
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] [data-testid="stMarkdownContainer"] { display: none; }
+[data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] [data-has-shortcut]::after {
+    content: "Escolher arquivo"; font-size: .9rem; font-weight: 600; margin-left: .35rem;
+}

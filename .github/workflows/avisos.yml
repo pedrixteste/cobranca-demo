@@ -1,0 +1,40 @@
+name: Avisos de cobrança no Telegram
+
+on:
+  schedule:
+    # 10:30 UTC = 07:30 BRT (Brasil não tem horário de verão desde 2020)
+    - cron: '30 10 * * *'
+  workflow_dispatch:   # Permite rodar na mão pela aba Actions do GitHub
+    inputs:
+      modo:
+        description: 'auto = resumo da semana na segunda, diário nos outros dias'
+        type: choice
+        options: [auto, diario, semanal]
+        default: auto
+
+jobs:
+  avisar:
+    runs-on: ubuntu-latest
+    # O job só lê o repositório; sem isso o token do Actions nasce podendo escrever.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install "gspread>=6,<7" "google-auth>=2.20,<3" "requests>=2.31,<3" tzdata
+
+      - name: Enviar avisos
+        env:
+          SPREADSHEET_ID:      ${{ secrets.SPREADSHEET_ID }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS:   ${{ secrets.TELEGRAM_CHAT_IDS }}
+          MODO:                ${{ github.event.inputs.modo || 'auto' }}
+        run: python notifier.py

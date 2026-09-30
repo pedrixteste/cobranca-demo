@@ -1,0 +1,9 @@
+# Teto de versão em tudo: o Streamlit Cloud reinstala as bibliotecas do zero a
+# cada publicação. Sem teto, uma versão nova lançada lá fora entra sozinha e
+# pode derrubar o app sem ninguém ter mexido numa linha de código.
+streamlit>=1.45.0,<2.0.0
+gspread>=6.0.0,<7.0.0
+google-auth>=2.20.0,<3.0.0
+google-api-python-client>=2.0.0,<3.0.0
+Pillow>=10.0.0,<13.0.0
+tzdata>=2024.1
