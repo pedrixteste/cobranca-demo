@@ -10,6 +10,7 @@ import streamlit.components.v1 as components
 
 from dados import (Local, Planilha, drive_configurado, enviar_comprovante, excluir_cobranca,
                    restaurar_cobranca)
+from demo import banco_demo
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, ROTULO_CLI,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
@@ -68,6 +69,12 @@ def _segredo(chave: str):
         return None
 
 
+def _modo_demo() -> bool:
+    """Demonstração com clientes de exemplo (secret modo_demo = true); não toca em planilha."""
+    valor = os.environ.get("COBRANCA_DEMO") or _segredo("modo_demo")
+    return str(valor).lower() in ("true", "1", "sim")
+
+
 @st.cache_resource(show_spinner=False)
 def _banco():
     """
@@ -79,6 +86,8 @@ def _banco():
     local = os.environ.get("COBRANCA_LOCAL", "").strip()
     if local:
         return Local(local)
+    if _modo_demo():
+        return banco_demo(_hoje())
     sid = _segredo("spreadsheet_id")
     cred = _segredo("gcp_service_account")
     if not sid or not cred:
@@ -300,6 +309,13 @@ def tela_inicio():
     if st.button("Cobranças excluídas", key="btn_excluidas", icon=":material/restore_from_trash:",
                  type="tertiary"):
         _ir("excluidas")
+
+    if _modo_demo() and st.button("Recomeçar o exemplo do zero", key="btn_demo_reset",
+                                  icon=":material/refresh:", type="tertiary"):
+        banco_demo(_hoje(), recomecar=True)
+        _invalidar()
+        _flash("Exemplo recomeçado")
+        st.rerun()
 
 
 # ── Nova cobrança: escolher o tipo ────────────────────────────────────────────
@@ -1146,6 +1162,9 @@ if (!(P.history.state && P.history.state.voltarApp)) { P.history.pushState({volt
 
 st.session_state.setdefault("tela", "inicio")
 _mostrar_flash()
+if _modo_demo():
+    st.markdown("<div class='demo-faixa'><b>Demonstração</b> · clientes de exemplo, pode testar à "
+                "vontade: nada aqui é real nem vai para a planilha.</div>", unsafe_allow_html=True)
 
 telas = {
     "inicio": tela_inicio,

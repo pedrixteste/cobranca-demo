@@ -45,6 +45,10 @@ header[data-testid="stHeader"] { display: none; }
     * { transition: none !important; animation: none !important; }
 }
 
+.demo-faixa { background: #FBEFD9; color: #6B4A12; border: 1px dashed #D69A2D; border-radius: 12px;
+              padding: 8px 12px; font-size: .84rem; margin-bottom: .4rem; }
+.st-key-btn_demo_reset button { color: var(--apoio); }
+
 /* ── Títulos e caixas de texto ───────────────────────────────────────────── */
 
 .st-key-voltar_topo button { min-height: 2rem; padding: 0; color: var(--apoio); }
