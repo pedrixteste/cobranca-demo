@@ -30,6 +30,9 @@
     --atraso:  #F2715B;  --atraso-forte: #C4432B;  --atraso-bg: #4A211A;  --atraso-leve: #2B1916;  --atraso-texto: #FFB7AA;
     --breve:   #F5A55A;  --breve-bg:  #472C12;  --breve-leve:  #2A1F14;  --breve-cor: #E8862A;  --sobre-breve: #1B1206;
     --neutro:  #A4A9B4;  --neutro-bg: #2B2F38;
+    /* forma de pagamento: Pix AZUL, Cartão ROSA (só para diferenciar de relance) */
+    --pix:     #9CCBFF;  --pix-bg:    #16355C;
+    --cartao-cor: #FFA9D4;  --cartao-bg: #56203F;
     --selo-fundo: rgba(20,22,27,.82);   /* atrás dos carimbos PAGO / QUITADO */
     --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
     --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -151,6 +154,9 @@ header[data-testid="stHeader"] { display: none; }
 .sit.c-atraso { background: var(--atraso-forte); color: #fff; }
 .sit.c-breve  { background: var(--breve-bg);  color: var(--breve); }
 .sit.c-neutro { background: var(--neutro-bg); color: var(--neutro); }
+.tp { font-size: .66rem; font-weight: 700; padding: 1px 7px; border-radius: 99px; white-space: nowrap; flex: none; }
+.tp-pix    { background: var(--pix-bg);    color: var(--pix); }
+.tp-cartao { background: var(--cartao-bg); color: var(--cartao-cor); }
 
 .pg   { height: 7px; background: var(--neutro-bg); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
 .pg i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
@@ -217,7 +223,7 @@ header[data-testid="stHeader"] { display: none; }
 .pc-data  { width: 56px; flex: none; border-radius: 12px; display: flex; flex-direction: column;
             align-items: center; justify-content: center; padding: 7px 0; font-family: var(--mono);
             background: var(--neutro-bg); color: var(--neutro); }
-.pc-mes   { font-size: .64rem; font-weight: 700; letter-spacing: .1em; }
+.pc-mes   { font-size: .56rem; font-weight: 700; letter-spacing: .03em; white-space: nowrap; }   /* 'OUT 2026' */
 .pc-dia   { font-family: var(--display); font-weight: 800; font-size: 1.5rem; line-height: 1; margin: 2px 0 1px; }
 .pc-sem   { font-size: .64rem; font-weight: 600; }
 .pc.c-ok .pc-data     { background: var(--ok-forte); color: #fff; }
@@ -225,7 +231,8 @@ header[data-testid="stHeader"] { display: none; }
 .pc.c-breve .pc-data  { background: var(--breve-cor); color: var(--sobre-breve); }
 
 .pc-corpo { flex: 1; min-width: 0; }
-.pc-topo  { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pc-topo  { display: flex; align-items: center; gap: 6px; }
+.pc-topo .pc-tag { flex: 1; }
 .pc-tag   { font-family: var(--mono); font-size: .66rem; font-weight: 600; letter-spacing: .08em;
             text-transform: uppercase; color: var(--apoio); white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; min-width: 0; }

@@ -299,10 +299,6 @@ def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
     return v, True
 
 
-def _data_curta(d: date, hoje: date) -> str:
-    return d.strftime("%d/%m") if d.year == hoje.year else d.strftime("%d/%m/%Y")
-
-
 def _limpar_campos(prefixo: str):
     for k in [k for k in st.session_state if str(k).startswith(prefixo)]:
         del st.session_state[k]
@@ -973,17 +969,24 @@ def _chip_sit(sit: str) -> str:
     return f"<span class='sit {COR_CLI[sit]}'>{ROTULO_CLI[sit]}</span>"
 
 
+def _chip_tipo(tipo: str) -> str:
+    """Etiqueta da forma de pagamento: Pix azul, Cartão rosa (para bater o olho e diferenciar)."""
+    return f"<span class='tp {'tp-cartao' if tipo == TIPO_CARTAO else 'tp-pix'}'>{_e(tipo)}</span>"
+
+
 def _linha_estado(c: dict, hoje: date) -> str:
+    """A data vai SEMPRE por extenso e com o ano (tem parcela que cai no ano seguinte)."""
     if c["situacao"] == CLI_QUITADO:
         return "Tudo pago"
     if c["situacao"] == CLI_ATRASADO:
         d = c["dias_atraso"]
-        return (f"<b>{formatar_brl(c['atrasado'])}</b> atrasado · há {d} dia{'s' if d > 1 else ''}")
+        desde = data_br(hoje - timedelta(days=d))
+        return f"<b>{formatar_brl(c['atrasado'])}</b> atrasado desde <b>{desde}</b> ({d} dia{'s' if d > 1 else ''})"
     p = c["proxima"]
     if p:
-        quando = ("hoje" if p["vencimento"] == hoje else "amanhã" if p["vencimento"] == hoje + timedelta(days=1)
-                  else _data_curta(p["vencimento"], hoje))
-        return f"Próxima: <b>{quando}</b> · {formatar_brl(p['valor'])}"
+        apelido = (" (hoje)" if p["vencimento"] == hoje
+                   else " (amanhã)" if p["vencimento"] == hoje + timedelta(days=1) else "")
+        return f"Próxima: <b>{data_br(p['vencimento'])}</b>{apelido} · {formatar_brl(p['valor'])}"
     return ""
 
 
@@ -999,8 +1002,9 @@ def _html_cliente(c: dict, hoje: date) -> str:
     estado = "" if quitado else f"<div class='cc-est'>{_linha_estado(c, hoje)}</div>"
     return (
         f"<div class='cc {COR_CLI[c['situacao']]}'>"
-        f"<div class='cc-l1'><span class='cc-nome'>{_e(c['cliente'])}</span>{nota}{_chip_sit(c['situacao'])}</div>"
-        f"<div class='cc-l2'><span class='cc-turma'>{_e(c['turma'])} · {_e(c['treinamento'])} · {_e(c['tipo'])}</span>"
+        f"<div class='cc-l1'><span class='cc-nome'>{_e(c['cliente'])}</span>{nota}"
+        f"{_chip_tipo(c['tipo'])}{_chip_sit(c['situacao'])}</div>"
+        f"<div class='cc-l2'><span class='cc-turma'>{_e(c['turma'])} · {_e(c['treinamento'])}</span>"
         f"<span class='cc-val'>{valor}</span></div>{estado}"
         f"<i class='cc-pg' style='width:{pct}%'></i></div>"
     )
@@ -1104,10 +1108,10 @@ def _rotulo_dia(d: date, hoje: date) -> str:
     if d < hoje:
         return "Atrasadas"
     if d == hoje:
-        return f"Hoje · {DIAS_SEMANA[d.weekday()]} {d.strftime('%d/%m')}"
+        return f"Hoje · {DIAS_SEMANA[d.weekday()]} {data_br(d)}"
     if d == hoje + timedelta(days=1):
-        return f"Amanhã · {DIAS_SEMANA[d.weekday()]} {d.strftime('%d/%m')}"
-    return f"{DIAS_SEMANA[d.weekday()]} {_data_curta(d, hoje)}"
+        return f"Amanhã · {DIAS_SEMANA[d.weekday()]} {data_br(d)}"
+    return f"{DIAS_SEMANA[d.weekday()]} {data_br(d)}"
 
 
 def _visao_agenda(cobs: list, hoje: date):
@@ -1138,7 +1142,7 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     d = p["vencimento"]
     cor = COR_PARC[p["situacao"]]
     if d:
-        bloco = (f"<div class='pc-data'><span class='pc-mes'>{MESES_ABREV[d.month - 1]}</span>"
+        bloco = (f"<div class='pc-data'><span class='pc-mes'>{MESES_ABREV[d.month - 1]} {d.year}</span>"
                  f"<span class='pc-dia'>{d.day}</span><span class='pc-sem'>{DIAS_SEMANA[d.weekday()]}</span></div>")
     else:
         bloco = "<div class='pc-data'><span class='pc-dia'>?</span></div>"
@@ -1168,7 +1172,8 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
         quem = f" · {texto_vezes(p['valor'], p['vezes'])}" + quem
     return (
         f"<div class='pc {cor}{' pago' if p['paga'] else ''}'>{bloco}<div class='pc-corpo'>"
-        f"<div class='pc-topo'><span class='pc-tag'>{topo}</span>{sit}</div>{nome}"
+        f"<div class='pc-topo'><span class='pc-tag'>{topo}</span>"
+        f"{_chip_tipo(c['tipo']) if mostrar_cliente else ''}{sit}</div>{nome}"
         f"<div class='pc-rot'>{_e(p['rotulo'])}{quem}</div>"
         f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div>{obs}</div>{carimbo}</div>"
     )
