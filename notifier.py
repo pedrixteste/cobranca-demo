@@ -83,7 +83,8 @@ def _linha(p: dict, c: dict, hoje: date) -> str:
     forma = "Pix"
     if c["tipo"] == nucleo.TIPO_CARTAO:
         forma = "💳 passar cartão" + (f" em {p['vezes']}x" if p.get("vezes", 1) > 1 else "")
-    return (f"• <b>{_esc(c['cliente'])}</b> ({_esc(c['turma'])}) · {nucleo.formatar_brl(p['valor'])}"
+    onde = c["turma"] + (f" · {c['cidade']}" if c.get("cidade") else "")
+    return (f"• <b>{_esc(c['cliente'])}</b> ({_esc(onde)}) · {nucleo.formatar_brl(p['valor'])}"
             f" · {_esc(p['rotulo'].lower())} · {forma} · {quando}")
 
 

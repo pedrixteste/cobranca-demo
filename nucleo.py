@@ -50,7 +50,7 @@ SITUACAO_ATIVA    = "Ativa"
 SITUACAO_EXCLUIDA = "Excluída"
 
 COBRANCAS_HEADERS = ["ID", "Tipo", "Cliente", "Turma", "Treinamento", "Valor Total",
-                     "Criada em", "Criada por", "Situação", "Excluída em", "Observações"]
+                     "Criada em", "Criada por", "Situação", "Excluída em", "Observações", "Cidade"]
 PARCELAS_HEADERS = ["ID Cobrança", "Nº", "Vencimento", "Valor", "Status", "Pago em",
                     "Comprovante", "Marcado por", "Registrado em", "Observação", "Vezes no cartão"]
 
@@ -392,6 +392,7 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "valor_total": valor_para_float(c.get("Valor Total")),
             "criada_em": parse_data(c.get("Criada em")),
             "criada_por": _txt(c.get("Criada por")),
+            "cidade": _txt(c.get("Cidade")),   # texto livre: "Lajeado", "Laj", "SCS"...
             "observacoes": _txt(c.get("Observações")),
             # tem anotação na cobrança OU em alguma parcela (ex.: "pago em permuta")
             "tem_obs": bool(_txt(c.get("Observações")) or any(p["observacao"] for p in ps)),
@@ -408,6 +409,20 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "situacao": sit,
         })
     return saida
+
+
+def cidade_da_turma(cobs: list[dict], turma: str) -> str:
+    """Cidade mais usada nas cobranças já cadastradas daquela turma ('' se nenhuma tem)."""
+    contagem: dict[str, int] = {}
+    for c in cobs:
+        if c["turma"] == turma and c.get("cidade"):
+            contagem[c["cidade"]] = contagem.get(c["cidade"], 0) + 1
+    return max(contagem, key=contagem.get) if contagem else ""
+
+
+def local_da_cobranca(c: dict) -> str:
+    """'L345 · LORAP · Lajeado' (a cidade só aparece se foi preenchida)."""
+    return " · ".join(x for x in (c["turma"], c["treinamento"], c.get("cidade", "")) if x)
 
 
 def ordenar_para_cobrar(cobs: list[dict]) -> list[dict]:
@@ -433,7 +448,7 @@ def casa_busca(c: dict, termo: str) -> bool:
     if turma_buscada and turma_buscada == c["turma"]:
         return True
     notas = " ".join([c.get("observacoes", "")] + [p.get("observacao", "") for p in c.get("parcelas", [])])
-    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {notas}")
+    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {c.get('cidade', '')} {notas}")
     return all(palavra in alvo for palavra in chave_busca(termo).split())
 
 

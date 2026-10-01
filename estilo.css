@@ -85,6 +85,8 @@ header[data-testid="stHeader"] { display: none; }
 .cx-perigo { background: var(--atraso-bg); color: var(--atraso-texto); }
 .cx-nota   { background: transparent; border: 1px dashed var(--linha); color: var(--apoio); font-size: .84rem; }
 .cx-erro   { color: var(--atraso-texto); font-size: .84rem; margin: -.55rem 0 .2rem; line-height: 1.35; }
+.cx-dica   { color: var(--apoio); font-size: .82rem; margin: -.5rem 0 .2rem; line-height: 1.35; }
+.cx-dica b { color: var(--marca-2); font-weight: 600; }
 .cx-divisa { border-top: 1px solid var(--linha); margin: 10px 0 2px; }
 .cx-vazio  { text-align: center; color: var(--apoio); padding: 28px 12px; font-size: .95rem; }
 

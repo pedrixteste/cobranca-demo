@@ -49,7 +49,8 @@ import feriados
 import notifier
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
                     administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
-                    MAX_VEZES_CARTAO, opcoes_avisos, pessoas_da_config, texto_vezes,
+                    MAX_VEZES_CARTAO, cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
+                    texto_vezes,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
@@ -711,6 +712,13 @@ def _bloco_cliente(prefixo: str):
         _info(f"Turma <b>{turma}</b> · {treino}")
     elif turma_txt.strip():
         _erro_campo("Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345")
+    # Cidade: texto livre e opcional (vai junto no _salvar, lida de st.session_state[f"{prefixo}cidade"])
+    st.text_input("Cidade da turma", key=f"{prefixo}cidade", max_chars=40, placeholder="Ex.: Lajeado, SCS…",
+                  help="Opcional. Escreva do jeito que quiser.")
+    ja_usada = cidade_da_turma(_cobrancas() or [], turma) if turma else ""
+    if ja_usada and not st.session_state.get(f"{prefixo}cidade", "").strip():
+        st.markdown(f"<div class='cx-dica'>Outras cobranças da turma {_e(turma)} estão como "
+                    f"<b>{_e(ja_usada)}</b>.</div>", unsafe_allow_html=True)
     erros = []
     if not cliente:
         erros.append("Falta o nome do cliente.")
@@ -742,7 +750,8 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
         cid = _banco().criar_cobranca(
             {"Tipo": tipo, "Cliente": cliente, "Turma": turma, "Treinamento": treino,
              "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
-             "Observações": observacoes.strip()},
+             "Observações": observacoes.strip(),
+             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split())},
             parcelas,
         )
     except Exception as e:
@@ -1004,7 +1013,7 @@ def _html_cliente(c: dict, hoje: date) -> str:
         f"<div class='cc {COR_CLI[c['situacao']]}'>"
         f"<div class='cc-l1'><span class='cc-nome'>{_e(c['cliente'])}</span>{nota}"
         f"{_chip_tipo(c['tipo'])}{_chip_sit(c['situacao'])}</div>"
-        f"<div class='cc-l2'><span class='cc-turma'>{_e(c['turma'])} · {_e(c['treinamento'])}</span>"
+        f"<div class='cc-l2'><span class='cc-turma'>{_e(local_da_cobranca(c))}</span>"
         f"<span class='cc-val'>{valor}</span></div>{estado}"
         f"<i class='cc-pg' style='width:{pct}%'></i></div>"
     )
@@ -1161,7 +1170,7 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
             txt = "Em aberto"
         sit = f"<span class='sit {cor}'>{txt}</span>"
     # Na ficha o cliente, a turma e a forma já estão no título: o topo fica vazio
-    topo = f"{_e(c['turma'])} · {_e(c['treinamento'])}" if mostrar_cliente else ""
+    topo = _e(local_da_cobranca(c)) if mostrar_cliente else ""
     nome = f"<div class='pc-nome'>{_e(c['cliente'])}</div>" if mostrar_cliente else ""
     quem = ""
     if p["paga"] and p["marcado_por"]:
@@ -1444,6 +1453,8 @@ def _dlg_editar(cid: str):
         _info(f"Turma <b>{turma}</b> · {TREINAMENTOS[turma[0]]}")
     else:
         _erro_campo("Turma não reconhecida. Ex.: L345")
+    cidade = st.text_input("Cidade da turma", value=c["cidade"], key=f"{k}_cidade", max_chars=40,
+                           placeholder="Ex.: Lajeado, SCS…")
     total, ok_t = _valor("Valor total", f"{k}_total",
                          placeholder=f"{(c['valor_total'] or 0):.2f}".replace(".", ","),
                          help="Em branco = continua o mesmo.")
@@ -1453,7 +1464,7 @@ def _dlg_editar(cid: str):
             st.error("Confira o nome, a turma e o valor.")
             return
         campos = {"Cliente": cliente, "Turma": turma, "Treinamento": TREINAMENTOS[turma[0]],
-                  "Observações": obs.strip()}
+                  "Observações": obs.strip(), "Cidade": " ".join(cidade.split())}
         if total:
             campos["Valor Total"] = total
         try:
@@ -1503,7 +1514,7 @@ def tela_cobranca():
         st.info("Essa cobrança não está mais disponível.")
         return
     _cabecalho(c["cliente"], voltar_para=volta,
-               subtitulo=f"Turma {_e(c['turma'])} · {_e(c['treinamento'])} · {_e(c['tipo'])}")
+               subtitulo=f"Turma {_e(local_da_cobranca(c))} · {_e(c['tipo'])}")
 
     total = c["pago"] + c["falta"]
     pct = int(round(100 * c["pago"] / total)) if total else 0

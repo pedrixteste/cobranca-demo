@@ -281,6 +281,37 @@ class CartaoParcelado(unittest.TestCase):
         self.assertIn("passar cartão em 8x", notifier.montar_diario(cobs, HOJE))
 
 
+class Cidade(unittest.TestCase):
+    def setUp(self):
+        self.cobs = n.montar_cobrancas(
+            [{**cob("a1", cliente="Maria", turma="L345"), "Cidade": "Lajeado"},
+             {**cob("b2", cliente="João", turma="L345"), "Cidade": "Lajeado"},
+             {**cob("c3", cliente="Ana", turma="L345"), "Cidade": "Laj"},
+             {**cob("d4", cliente="Rui", turma="V12"), "Cidade": "SCS"},
+             cob("e5", cliente="Bia", turma="I7")],
+            [parc(i, 1, "20/10/2026", "100,00") for i in ("a1", "b2", "c3", "d4", "e5")], HOJE)
+
+    def test_texto_livre_e_opcional(self):
+        self.assertEqual([c["cidade"] for c in self.cobs], ["Lajeado", "Lajeado", "Laj", "SCS", ""])
+
+    def test_local(self):
+        self.assertEqual(n.local_da_cobranca(self.cobs[0]), "L345 · LORAP · Lajeado")
+        self.assertEqual(n.local_da_cobranca(self.cobs[4]), "I7 · Impacto")
+
+    def test_busca_por_cidade(self):
+        self.assertEqual(sorted(c["cliente"] for c in n.filtrar(self.cobs, "lajeado")), ["João", "Maria"])
+        self.assertEqual([c["cliente"] for c in n.filtrar(self.cobs, "scs")], ["Rui"])
+
+    def test_sugestao_e_a_mais_usada_da_turma(self):
+        self.assertEqual(n.cidade_da_turma(self.cobs, "L345"), "Lajeado")
+        self.assertEqual(n.cidade_da_turma(self.cobs, "I7"), "")
+        self.assertEqual(n.cidade_da_turma(self.cobs, "P1"), "")
+
+    def test_aviso_do_telegram_leva_a_cidade(self):
+        cobs = n.montar_cobrancas([{**cob(), "Cidade": "Lajeado"}], [parc("a1", 1, "30/09/2026", "450,00")], HOJE)
+        self.assertIn("(L345 · Lajeado)", notifier.montar_diario(cobs, HOJE))
+
+
 class Notificacoes(unittest.TestCase):
     CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
            "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}
