@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 import tempfile
@@ -48,9 +49,57 @@ class Excel(unittest.TestCase):
         copia = b.montar("Teste", abas(extra={"_Obs": perigosos}), DIA1)
         self.assertEqual(b.ler_xlsx(b.gerar_xlsx(copia)), copia["abas"])
 
-    def test_leia_me_nao_entra_na_volta(self):
+    def test_abas_de_leitura_nao_entram_na_volta(self):
         copia = b.montar("Teste", abas(), DIA1)
-        self.assertNotIn(b.ABA_LEIAME, b.ler_xlsx(b.gerar_xlsx(copia)))
+        self.assertEqual(set(b.ler_xlsx(b.gerar_xlsx(copia))), set(copia["abas"]))
+
+    def test_abas_de_leitura_vem_primeiro_e_batem_com_o_app(self):
+        from openpyxl import load_workbook
+        dados = {
+            "_Cobrancas": [["ID", "Tipo", "Cliente", "Turma", "Valor Total", "Situação", "Cidade", "Observações"],
+                           ["a1", "Pix", "Maria Souza", "L345", "3000,00", "Ativa", "Lajeado", "=perigo"],
+                           ["b2", "Cartão", "João Lima", "V12", "1000,00", "Ativa", "", ""],
+                           ["c3", "Pix", "Excluído da Silva", "L345", "500,00", "Excluída", "", ""]],
+            "_Parcelas": [["ID Cobrança", "Nº", "Vencimento", "Valor", "Status", "Pago em", "Marcado por"],
+                          ["a1", "0", "01/09/2026", "1000,00", "Paga", "01/09/2026", "Gabi"],
+                          ["a1", "1", "20/09/2026", "1000,00", "", "", ""],
+                          ["a1", "2", "20/10/2026", "1000,00", "", "", ""],
+                          ["b2", "1", "15/10/2026", "1000,00", "Paga", "15/09/2026", "Ana"],
+                          ["c3", "1", "01/01/2026", "500,00", "", "", ""]],
+        }
+        wb = load_workbook(io.BytesIO(b.gerar_xlsx(b.montar("T", dados, DIA1))))
+        self.assertEqual(wb.sheetnames[:3], ["Resumo", "Parcela por parcela", "LEIA-ME"])
+        r = wb["Resumo"]
+        topo = {r.cell(row=i, column=1).value: r.cell(row=i, column=2).value for i in range(4, 9)}
+        self.assertEqual(topo, {"Cobranças ativas": 2, "Já recebido": 2000, "Falta receber": 2000,
+                                "Atrasado": 1000, "Clientes atrasados": 1})
+        linhas = [[c.value for c in linha] for linha in r.iter_rows(min_row=11, max_row=13)]
+        self.assertEqual([l[0] for l in linhas], ["Maria Souza", "João Lima", "Excluído da Silva"])
+        maria = linhas[0]
+        self.assertEqual(maria[5:9], [3000, 1000, 2000, "1 de 3"])
+        self.assertEqual(maria[9].date(), DIA1.date().replace(day=20))   # próxima: 20/10/2026
+        self.assertEqual((maria[11], maria[12]), ("Atrasado há 11 dias", "=perigo"))
+        self.assertEqual(r.cell(row=11, column=13).data_type, "s")       # observação não vira fórmula
+        self.assertEqual((linhas[1][11], linhas[2][11]), ("Quitado", "Excluída"))
+        p = wb["Parcela por parcela"]
+        self.assertEqual(p.max_row, 5)   # cabeçalho + 4 parcelas das cobranças ativas
+        self.assertEqual([c.value for c in p[2]][3:8] + [p.cell(row=2, column=10).value],
+                         ["Pix", "Entrada", p.cell(row=2, column=6).value, 1000, "Paga", "Gabi"])
+        self.assertEqual(p.cell(row=3, column=8).value, "Atrasada")
+
+    def test_resumo_quebrado_nao_impede_a_copia_exata(self):
+        import nucleo
+        original = nucleo.montar_cobrancas
+        nucleo.montar_cobrancas = lambda *a, **k: 1 / 0
+        try:
+            copia = b.montar("Teste", abas(), DIA1)
+            self.assertEqual(b.ler_xlsx(b.gerar_xlsx(copia)), copia["abas"])
+        finally:
+            nucleo.montar_cobrancas = original
+
+    def test_aba_da_planilha_chamada_resumo_nao_se_perde(self):
+        copia = b.montar("Teste", abas(extra={"Resumo": [["meu resumo"]]}), DIA1)
+        self.assertEqual(b.ler_xlsx(b.gerar_xlsx(copia)), copia["abas"])
 
 
 class Conferencia(unittest.TestCase):
@@ -97,6 +146,16 @@ class Pasta(unittest.TestCase):
         self.assertTrue(gravou)
         self.assertEqual(len(self.arquivos()), 5)
         self.assertEqual((self.pasta / "2026/Cobrancas_2026-10-01_07h40.json").read_bytes(), antiga)
+
+    def test_copia_em_formato_antigo_e_refeita_uma_vez(self):
+        velha = b.montar("T", abas(), DIA1)
+        velha["formato"] = 1
+        b.salvar_pasta(velha, self.pasta)
+        _, gravou, _ = b.salvar_pasta(b.montar("T", abas(), DIA2), self.pasta)
+        self.assertTrue(gravou)
+        _, gravou, _ = b.salvar_pasta(b.montar("T", abas(), DIA2.replace(hour=19)), self.pasta)
+        self.assertFalse(gravou)
+        self.assertEqual(len(self.arquivos()), 5)
 
     def test_encolheu_guarda_a_copia_e_avisa(self):
         b.salvar_pasta(b.montar("T", abas(5), DIA1), self.pasta)

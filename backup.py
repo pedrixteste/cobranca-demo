@@ -49,12 +49,25 @@ ABAS_OBRIGATORIAS = ("_Cobrancas", "_Parcelas")
 PREFIXO = "Cobrancas_"
 MARCA = "ULTIMA_CONFERENCIA.txt"
 ABA_LEIAME = "LEIA-ME"
+# Abas do Excel feitas para gente ler (amarelas); as outras são a cópia exata da planilha
+ABAS_LEITURA = ("Resumo", "Parcela por parcela")
+COR_LEITURA = "F2DD82"
+# Sobe quando o arquivo de backup ganha algo novo: a próxima rodada grava uma cópia no formato
+# novo mesmo sem mudança na planilha (2 = o Excel ganhou as abas de leitura)
+FORMATO = 2
 PASTA_DRIVE = "Cobranças Vithall - Backups"
 # Parcela pode ser removida pelo app (editar cobrança); só acusa sumiço em massa
 QUEDA_PARCELAS = 0.20
 
 _MIME_PASTA = "application/vnd.google-apps.folder"
 _MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+_REAIS = "R$ #,##0.00"
+_DATA = "DD/MM/YYYY"
+_ROTULO_PARCELA = {"paga": "Paga", "atrasada": "Atrasada", "em_breve": "Vence em breve", "aberta": "Em aberto"}
+# (começo do texto da situação, cor de fundo)
+_COR_SITUACAO = [("Atrasad", "F8D7DA"), ("Vence em breve", "FFE5B4"), ("Quitado", "D4EDDA"),
+                 ("Paga", "D4EDDA"), ("Excluída", "E2E3E5")]
 
 
 def _limpo(valor: str) -> str:
@@ -111,7 +124,7 @@ def ler_planilha(spreadsheet_id: str) -> dict:
 
 def montar(titulo: str, abas: dict, quando: datetime | None = None) -> dict:
     abas = normalizar(abas)
-    return {"formato": 1, "planilha": titulo,
+    return {"formato": FORMATO, "planilha": titulo,
             "feito_em": (quando or agora_sp()).isoformat(timespec="seconds"),
             "impressao": impressao_digital(abas), "abas": abas}
 
@@ -158,14 +171,155 @@ def gerar_json(copia: dict) -> bytes:
     return json.dumps(copia, ensure_ascii=False, indent=1).encode("utf-8")
 
 
-def gerar_xlsx(copia: dict) -> bytes:
-    """Uma aba do Excel por aba da planilha, toda célula como TEXTO (nada vira número, data ou fórmula)."""
-    from openpyxl import Workbook
+def _escrever(cel, valor):
+    """Texto vai sempre como TEXTO (nada vira fórmula); número e data vão como estão."""
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    if isinstance(valor, str):
+        if valor == "":
+            return
+        cel.value = ILLEGAL_CHARACTERS_RE.sub("", valor)
+        cel.data_type = "s"
+    elif valor is not None:
+        cel.value = valor
+
+
+def _nome_livre(nome: str, usados: set) -> str:
+    while nome.lower() in usados:
+        nome += " (leitura)"
+    usados.add(nome.lower())
+    return nome[:31]
+
+
+def _tabela(ws, linha0: int, colunas: list, linhas: list):
+    """colunas = [(título, largura, formato)]; a coluna "Situação" ganha cor conforme o texto."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    cabecalho = PatternFill("solid", fgColor="1F3A5F")
+    for j, (titulo, largura, _) in enumerate(colunas, start=1):
+        cel = ws.cell(row=linha0, column=j, value=titulo)
+        cel.font = Font(bold=True, color="FFFFFF")
+        cel.fill = cabecalho
+        cel.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.column_dimensions[get_column_letter(j)].width = largura
+    for i, linha in enumerate(linhas, start=linha0 + 1):
+        for j, valor in enumerate(linha, start=1):
+            cel = ws.cell(row=i, column=j)
+            _escrever(cel, valor)
+            formato = colunas[j - 1][2]
+            if formato and not isinstance(valor, str):
+                cel.number_format = formato
+            if colunas[j - 1][0] == "Situação" and isinstance(valor, str):
+                cor = next((c for chave, c in _COR_SITUACAO if valor.startswith(chave)), None)
+                if cor:
+                    cel.fill = PatternFill("solid", fgColor=cor)
+    ws.freeze_panes = ws.cell(row=linha0 + 1, column=2)
+    if linhas:
+        ws.auto_filter.ref = f"A{linha0}:{get_column_letter(len(colunas))}{linha0 + len(linhas)}"
+
+
+def _abas_de_leitura(wb, copia: dict, usados: set):
+    """
+    Duas abas para GENTE ler, com as mesmas contas do app (pago, falta, atrasado, situação).
+    As outras abas são a cópia exata, e é só delas que a planilha é reconstruída.
+    """
+    import nucleo
+    from openpyxl.styles import Font
+
+    quando = datetime.fromisoformat(copia["feito_em"])
+    abas = copia["abas"]
+    cobs = nucleo.montar_cobrancas(nucleo.linhas_de_valores(abas.get("_Cobrancas", [])),
+                                   nucleo.linhas_de_valores(abas.get("_Parcelas", [])),
+                                   quando.date(), incluir_excluidas=True)
+    ativas = nucleo.ordenar_para_cobrar([c for c in cobs if not c["excluida"]])
+    excluidas = [c for c in cobs if c["excluida"]]
+    totais = nucleo.resumo(ativas)
+
+    def situacao(c):
+        if c["excluida"]:
+            return "Excluída"
+        if c["situacao"] == nucleo.CLI_ATRASADO:
+            dias = c["dias_atraso"]
+            return f"Atrasado há {dias} dia{'s' if dias != 1 else ''}"
+        return nucleo.ROTULO_CLI[c["situacao"]]
+
+    resumo = wb.create_sheet(title=_nome_livre(ABAS_LEITURA[0], usados))
+    resumo.sheet_properties.tabColor = COR_LEITURA
+    resumo["A1"].value = "Cobranças Vithall"
+    resumo["A1"].font = Font(bold=True, size=14)
+    resumo["A2"].value = f"Situação em {quando.strftime('%d/%m/%Y às %H:%M')} (horário de Brasília)"
+    topo = [("Cobranças ativas", len(ativas), "0"), ("Já recebido", totais["recebido"], _REAIS),
+            ("Falta receber", totais["a_receber"], _REAIS), ("Atrasado", totais["atrasado"], _REAIS),
+            ("Clientes atrasados", totais["n_atrasados"], "0")]
+    for i, (rotulo, valor, formato) in enumerate(topo, start=4):
+        resumo.cell(row=i, column=1, value=rotulo).font = Font(bold=True)
+        resumo.cell(row=i, column=2, value=valor).number_format = formato
+    colunas = [("Cliente", 34, None), ("Turma", 9, None), ("Cidade", 16, None), ("Treinamento", 13, None),
+               ("Forma", 9, None), ("Valor total", 14, _REAIS), ("Já pago", 14, _REAIS),
+               ("Falta receber", 14, _REAIS), ("Parcelas pagas", 10, None), ("Próxima cobrança", 13, _DATA),
+               ("Valor da próxima", 14, _REAIS), ("Situação", 22, None), ("Observações", 40, None)]
+    linhas = []
+    for c in ativas + excluidas:
+        ps, prox = c["parcelas"], c["proxima"]
+        total = c["valor_total"] if c["valor_total"] is not None else c["pago"] + c["falta"]
+        linhas.append([c["cliente"], c["turma"], c["cidade"], c["treinamento"], c["tipo"], total, c["pago"],
+                       c["falta"], f"{sum(1 for p in ps if p['paga'])} de {len(ps)}",
+                       prox["vencimento"] if prox else None, prox["valor"] if prox else None,
+                       situacao(c), c["observacoes"]])
+    _tabela(resumo, 10, colunas, linhas)
+
+    parcelas = wb.create_sheet(title=_nome_livre(ABAS_LEITURA[1], usados))
+    parcelas.sheet_properties.tabColor = COR_LEITURA
+    colunas = [("Cliente", 34, None), ("Turma", 9, None), ("Cidade", 16, None), ("Forma", 9, None),
+               ("Parcela", 18, None), ("Vencimento", 13, _DATA), ("Valor", 14, _REAIS), ("Situação", 16, None),
+               ("Pago em", 13, _DATA), ("Quem recebeu", 16, None), ("Observação", 36, None),
+               ("Comprovante", 40, None)]
+    linhas = [[c["cliente"], c["turma"], c["cidade"], c["tipo"], p["rotulo"], p["vencimento"], p["valor"],
+               _ROTULO_PARCELA[p["situacao"]], p["pago_em"], p["marcado_por"], p["observacao"], p["comprovante"]]
+              for c in ativas for p in c["parcelas"]]
+    _tabela(parcelas, 1, colunas, linhas)
+
+
+def gerar_xlsx(copia: dict) -> bytes:
+    """
+    Abas amarelas (Resumo, Parcela por parcela, LEIA-ME): para gente ler.
+    Depois, uma aba por aba da planilha, toda célula como TEXTO (nada vira número, data ou
+    fórmula): é a cópia exata, de onde a planilha é reconstruída.
+    """
+    from openpyxl import Workbook
     from openpyxl.styles import Font
 
     wb = Workbook()
     wb.remove(wb.active)
+    usados = {nome[:31].lower() for nome in copia["abas"]} | {ABA_LEIAME.lower()}
+    sem_resumo = ""
+    try:
+        _abas_de_leitura(wb, copia, usados)
+    except Exception as e:   # o resumo é um extra: nunca pode impedir a cópia exata
+        for ws in list(wb.worksheets):
+            wb.remove(ws)
+        sem_resumo = f"As abas de leitura não puderam ser montadas nesta cópia ({type(e).__name__}: {e})."
+
+    leia = wb.create_sheet(title=ABA_LEIAME)
+    leia.sheet_properties.tabColor = COR_LEITURA
+    quando = datetime.fromisoformat(copia["feito_em"])
+    textos = [f"Cópia de segurança da planilha \"{copia['planilha']}\"",
+              f"Feita em {quando.strftime('%d/%m/%Y às %H:%M')} (horário de Brasília)", "",
+              "ABAS AMARELAS (Resumo e Parcela por parcela): para ler. Mostram cada cliente, quanto pagou,",
+              "quanto falta e a situação, com as mesmas contas do app. Pode filtrar e ordenar à vontade.", "",
+              "ABAS QUE COMEÇAM COM _ (e as demais sem cor): cópia exata da planilha do app. Não mexa nelas:",
+              "é a partir delas que a planilha é reconstruída se a original for perdida.", ""]
+    if sem_resumo:
+        textos += [sem_resumo, ""]
+    textos += ["Linhas em cada aba da cópia exata:"]
+    textos += [f"  {nome}: {n}" for nome, n in contagem(copia).items()]
+    textos += ["", "Para recuperar: abra este arquivo no Google Planilhas (Arquivo > Importar) ou",
+               "use o arquivo .json de mesmo nome com ferramentas/restaurar_backup.py.",
+               "Impressão digital do conteúdo: " + copia["impressao"]]
+    for i, texto in enumerate(textos, start=1):
+        leia.cell(row=i, column=1).value = texto
+    leia.column_dimensions["A"].width = 100
+
     for nome, linhas in copia["abas"].items():
         ws = wb.create_sheet(title=nome[:31])
         for i, linha in enumerate(linhas, start=1):
@@ -173,35 +327,23 @@ def gerar_xlsx(copia: dict) -> bytes:
                 if valor == "":
                     continue
                 cel = ws.cell(row=i, column=j)
-                cel.value = ILLEGAL_CHARACTERS_RE.sub("", valor)
-                cel.data_type = "s"      # texto começando com "=" não vira fórmula
+                _escrever(cel, valor)
                 cel.number_format = "@"
                 if i == 1:
                     cel.font = Font(bold=True)
         ws.freeze_panes = "A2"
-    leia = wb.create_sheet(title=ABA_LEIAME)
-    quando = datetime.fromisoformat(copia["feito_em"])
-    linhas = [f"Cópia de segurança da planilha \"{copia['planilha']}\"",
-              f"Feita em {quando.strftime('%d/%m/%Y às %H:%M')} (horário de Brasília)",
-              "", "Linhas em cada aba:"]
-    linhas += [f"  {nome}: {n}" for nome, n in contagem(copia).items()]
-    linhas += ["", "Para recuperar: abra este arquivo no Google Planilhas (Arquivo > Importar) ou",
-               "use o arquivo .json de mesmo nome com ferramentas/restaurar_backup.py.",
-               f"Impressão digital do conteúdo: {copia['impressao']}"]
-    for i, texto in enumerate(linhas, start=1):
-        leia.cell(row=i, column=1).value = texto
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
 def ler_xlsx(conteudo: bytes) -> dict:
-    """Abas de um .xlsx de backup, de volta ao formato da planilha (sem a LEIA-ME)."""
+    """Só a cópia exata de um .xlsx de backup, de volta ao formato da planilha (pula as abas amarelas)."""
     from openpyxl import load_workbook
 
-    wb = load_workbook(io.BytesIO(conteudo), read_only=True)
+    wb = load_workbook(io.BytesIO(conteudo))
     abas = {ws.title: [list(linha) for linha in ws.iter_rows(values_only=True)]
-            for ws in wb.worksheets if ws.title != ABA_LEIAME}
+            for ws in wb.worksheets if ws.sheet_properties.tabColor is None}
     return normalizar(abas)
 
 
@@ -237,7 +379,8 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
     pasta = Path(pasta)
     anterior = ultima_copia(pasta)
     sumiu = encolheu(anterior, copia)
-    if anterior and anterior.get("impressao") == copia["impressao"]:
+    if (anterior and anterior.get("impressao") == copia["impressao"]
+            and anterior.get("formato") == copia["formato"]):
         nome, gravou = nome_arquivo(anterior), False
     else:
         nome, gravou = nome_arquivo(copia), True
@@ -313,17 +456,19 @@ def enviar_drive(copia: dict, service) -> tuple[str, bool]:
     recentes = service.files().list(
         q="appProperties has { key='tipo' and value='backup-cobrancas' } and trashed = false",
         orderBy="name desc", pageSize=1, fields="files(name, appProperties)").execute().get("files", [])
-    if recentes and recentes[0].get("appProperties", {}).get("impressao") == copia["impressao"]:
+    props = recentes[0].get("appProperties", {}) if recentes else {}
+    if props.get("impressao") == copia["impressao"] and props.get("formato") == str(copia["formato"]):
         nome, gravou = recentes[0]["name"].rsplit(".", 1)[0], False
     else:
         nome, gravou = nome_arquivo(copia), True
         ano = _pasta_drive(service, nome[len(PREFIXO):len(PREFIXO) + 4], raiz)
         # Só o .json (enviado por último) leva a etiqueta: se o envio cair no meio, a próxima rodada refaz
-        etiqueta = {"tipo": "backup-cobrancas", "impressao": copia["impressao"]}
-        for ext, conteudo, mime, props in ((".xlsx", gerar_xlsx(copia), _MIME_XLSX, {}),
+        etiqueta = {"tipo": "backup-cobrancas", "impressao": copia["impressao"],
+                    "formato": str(copia["formato"])}
+        for ext, conteudo, mime, marcas in ((".xlsx", gerar_xlsx(copia), _MIME_XLSX, {}),
                                            (".json", gerar_json(copia), "application/json", etiqueta)):
             service.files().create(
-                body={"name": nome + ext, "parents": [ano], "appProperties": props},
+                body={"name": nome + ext, "parents": [ano], "appProperties": marcas},
                 media_body=MediaIoBaseUpload(io.BytesIO(conteudo), mimetype=mime, resumable=False),
                 fields="id").execute()
     marca = MediaIoBaseUpload(io.BytesIO(texto_marca(copia, nome + ".xlsx").encode("utf-8")),
