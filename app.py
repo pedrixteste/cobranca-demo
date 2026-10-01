@@ -9,6 +9,38 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 import streamlit.components.v1 as components
 
+
+def _recarregar_modulos_alterados():
+    """
+    No Streamlit Cloud, um `git push` troca os arquivos com o app LIGADO. O app.py é relido a
+    cada rodada, mas os outros arquivos (nucleo, dados...) ficam na memória na versão antiga,
+    e o app novo quebra com ImportError ao pedir uma função que a versão antiga não tem
+    (aconteceu em 01/10/2026). Aqui, a cada rodada, o que mudou no disco é recarregado.
+    Ordem: quem é importado pelos outros vem primeiro.
+    """
+    import importlib
+    import sys
+    pasta = Path(__file__).parent
+    vistos = sys.__dict__.setdefault("_cobranca_mtimes", {})
+    recarregou = False
+    for nome in ("nucleo", "dados", "demo", "feriados", "avisos_telegram", "notifier"):
+        try:
+            mtime = (pasta / f"{nome}.py").stat().st_mtime
+        except OSError:
+            continue
+        # recarrega também depois que uma dependência foi recarregada (dados usa nomes do nucleo)
+        if nome in sys.modules and (vistos.get(nome) != mtime or recarregou):
+            importlib.reload(sys.modules[nome])
+            recarregou = True
+        vistos[nome] = mtime
+    if recarregou:
+        # objetos guardados em cache foram criados pelas classes antigas
+        st.cache_resource.clear()
+        st.cache_data.clear()
+
+
+_recarregar_modulos_alterados()
+
 from dados import (Local, Planilha, drive_configurado, enviar_comprovante, excluir_cobranca,
                    restaurar_cobranca)
 from demo import banco_demo
