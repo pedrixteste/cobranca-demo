@@ -367,6 +367,7 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "treinamento": _txt(c.get("Treinamento")) or treinamento_da_turma(turma),
             "valor_total": valor_para_float(c.get("Valor Total")),
             "criada_em": parse_data(c.get("Criada em")),
+            "criada_por": _txt(c.get("Criada por")),
             "observacoes": _txt(c.get("Observações")),
             "excluida": excluida,
             "excluida_em": parse_data(c.get("Excluída em")),
@@ -456,6 +457,39 @@ def resumo(cobs: list[dict]) -> dict:
         "n_atrasados": sum(1 for c in cobs if c["situacao"] == CLI_ATRASADO),
         "n_cobrancas": len(cobs),
     }
+
+
+# ── Preferências de notificação (aba _Config, iguais para todo mundo) ─────────
+#   telegram:<nome>   chat do Telegram daquela pessoa
+#   avisos:<nome>     "nao" pausa os avisos só para ela
+#   avisar_atrasadas / avisar_hoje / avisar_amanha / resumo_semanal   "nao" desliga
+
+OPCOES_AVISO = {
+    "avisar_atrasadas": "Cobranças atrasadas",
+    "avisar_hoje": "O que é para cobrar hoje",
+    "avisar_amanha": "O que é para cobrar amanhã",
+    "resumo_semanal": "Resumo da semana (toda segunda)",
+}
+
+
+def _ligado(config: dict, chave: str) -> bool:
+    """Tudo começa ligado; só o texto 'nao' desliga."""
+    return chave_busca(config.get(chave, "")) not in ("nao", "não", "0", "false")
+
+
+def opcoes_avisos(config: dict) -> dict:
+    return {k: _ligado(config, k) for k in OPCOES_AVISO}
+
+
+def destinatarios(config: dict) -> list[tuple]:
+    """[(nome, chat_id)] de quem está conectado e não pausou os avisos."""
+    saida = []
+    for chave, valor in config.items():
+        if chave.startswith("telegram:") and _txt(valor):
+            nome = chave[len("telegram:"):]
+            if _ligado(config, f"avisos:{nome}"):
+                saida.append((nome, _txt(valor)))
+    return sorted(saida)
 
 
 def avisos(cobs: list[dict], hoje: date) -> dict:

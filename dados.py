@@ -211,6 +211,9 @@ class Local:
             self._gravar({"cobrancas": [], "parcelas": [], "config": {}})
 
     def _ler(self) -> dict:
+        # O arquivo pode sumir com o app ligado (pasta temporária limpa): recomeça vazio
+        if not os.path.exists(self._caminho):
+            self._gravar({"cobrancas": [], "parcelas": [], "config": {}})
         with open(self._caminho, encoding="utf-8") as f:
             return json.load(f)
 

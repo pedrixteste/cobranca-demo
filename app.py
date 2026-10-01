@@ -11,7 +11,11 @@ import streamlit.components.v1 as components
 from dados import (Local, Planilha, drive_configurado, enviar_comprovante, excluir_cobranca,
                    restaurar_cobranca)
 from demo import banco_demo
-from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, ROTULO_CLI,
+import avisos_telegram
+import feriados
+import notifier
+from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
+                    destinatarios, opcoes_avisos,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
@@ -137,13 +141,21 @@ def _cobranca(cid: str):
 
 
 def _usuario() -> str:
-    """E-mail de quem está usando (o Streamlit Cloud informa em app fechado)."""
-    try:
-        u = st.user
-        email = u.get("email") if hasattr(u, "get") else getattr(u, "email", None)
-        return str(email or "")
-    except Exception:
-        return ""
+    """Nome de quem está usando agora (escolhido na tela "Quem está usando?")."""
+    return st.session_state.get("_quem", "")
+
+
+def _email_login() -> str:
+    """E-mail do login do Streamlit Cloud, quando ele informa (nem sempre informa)."""
+    for atributo in ("user", "experimental_user"):
+        try:
+            u = getattr(st, atributo)
+            email = u.get("email") if hasattr(u, "get") else getattr(u, "email", None)
+            if email:
+                return str(email).strip().lower()
+        except Exception:
+            pass
+    return ""
 
 
 # ── Tamanho do texto ──────────────────────────────────────────────────────────
@@ -318,12 +330,97 @@ def tela_inicio():
                  type="tertiary"):
         _ir("excluidas")
 
+    # Acessos discretos, lado a lado
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Notificações", key="btn_notificacoes", icon=":material/notifications:", type="tertiary"):
+            _ir("notificacoes")
+    with c2:
+        if st.button("Feriados", key="btn_feriados", icon=":material/beach_access:", type="tertiary"):
+            _ir("feriados")
+
+    if _usuario() and st.button(f"Usando como {_usuario()} · trocar", key="btn_trocar_pessoa",
+                                icon=":material/person:", type="tertiary"):
+        st.session_state.pop("_quem", None)
+        st.session_state["_trocando"] = True
+        st.rerun()
+
     if _modo_demo() and st.button("Recomeçar o exemplo do zero", key="btn_demo_reset",
                                   icon=":material/refresh:", type="tertiary"):
         banco_demo(_hoje(), recomecar=True)
         _invalidar()
         _flash("Exemplo recomeçado")
         st.rerun()
+
+
+# ── Quem está usando ──────────────────────────────────────────────────────────
+# O app é uma conta só para todo mundo, mas cada cobrança guarda QUEM cadastrou
+# e cada pagamento guarda QUEM marcou. Não é senha (quem entra no app já passou
+# pelo login do Streamlit): é só um nome para o registro.
+# A pessoa é reconhecida, nesta ordem, por: (1) o endereço com ?quem=Nome, que
+# o app coloca sozinho depois da 1ª escolha; (2) o e-mail do login, se o
+# Streamlit informar, ligado ao nome na aba _Config. Sem nenhum dos dois, pergunta.
+
+MAX_NOME = 30
+
+
+def _pessoas() -> list:
+    return [p.strip() for p in _config().get("pessoas", "").split(",") if p.strip()]
+
+
+def _entrar_como(nome: str, pessoas: list):
+    nome = " ".join(nome.replace(",", " ").split())[:MAX_NOME]   # vírgula separa a lista em _Config
+    existente = next((p for p in pessoas if chave_busca(p) == chave_busca(nome)), None)
+    try:
+        if not existente:
+            _banco().save_config("pessoas", ", ".join(pessoas + [nome]))
+        email = _email_login()
+        if email:
+            _banco().save_config(f"pessoa_de:{email}", existente or nome)
+        _config.clear()
+    except Exception as e:
+        st.error(f"Não consegui guardar o nome: {e}")
+        return
+    st.session_state["_quem"] = existente or nome
+    st.session_state.pop("_trocando", None)
+    st.query_params["quem"] = existente or nome
+    st.rerun()
+
+
+def _identificado() -> bool:
+    """True se já se sabe quem está usando; senão mostra a tela de escolha e devolve False."""
+    if st.session_state.get("_quem"):
+        return True
+    if _banco() is None:
+        return True   # sem planilha configurada: a tela inicial mostra o erro
+    pessoas = _pessoas()
+    if not st.session_state.get("_trocando"):
+        pedido = chave_busca(st.query_params.get("quem", ""))
+        achada = next((p for p in pessoas if pedido and chave_busca(p) == pedido), None)
+        if not achada:
+            email = _email_login()
+            do_email = _config().get(f"pessoa_de:{email}") if email else None
+            achada = do_email if do_email in pessoas else None
+        if achada:
+            st.session_state["_quem"] = achada
+            return True
+
+    st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Quem está usando?</div>"
+                "<div class='cx-sub'>Fica registrado quem cadastrou cada cobrança e quem marcou "
+                "cada pagamento.</div>", unsafe_allow_html=True)
+    for i, p in enumerate(pessoas):
+        if st.button(p, key=f"quem_{i}", icon=":material/person:", use_container_width=True):
+            _entrar_como(p, pessoas)
+    with st.container(key="sec_quem"):
+        novo = st.text_input("Seu nome" if not pessoas else "Outra pessoa", key="quem_novo",
+                             max_chars=MAX_NOME, placeholder="Ex.: Pedro")
+        if st.button("Entrar", key="quem_entrar", type="primary", use_container_width=True,
+                     icon=":material/login:"):
+            if len(novo.strip()) < 2:
+                _erro_campo("Digite o seu nome.")
+            else:
+                _entrar_como(novo, pessoas)
+    return False
 
 
 # ── Nova cobrança: escolher o tipo ────────────────────────────────────────────
@@ -776,10 +873,14 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     # Na ficha o cliente, a turma e a forma já estão no título: o topo fica vazio
     topo = f"{_e(c['turma'])} · {_e(c['treinamento'])}" if mostrar_cliente else ""
     nome = f"<div class='pc-nome'>{_e(c['cliente'])}</div>" if mostrar_cliente else ""
+    quem = ""
+    if p["paga"] and p["marcado_por"]:
+        verbo = "passou" if c["tipo"] == TIPO_CARTAO else "recebeu"
+        quem = f"<br><span class='pc-quem'>{_e(p['marcado_por'])} {verbo}</span>"
     return (
         f"<div class='pc {cor}{' pago' if p['paga'] else ''}'>{bloco}<div class='pc-corpo'>"
         f"<div class='pc-topo'><span class='pc-tag'>{topo}</span>{sit}</div>{nome}"
-        f"<div class='pc-rot'>{_e(p['rotulo'])}</div>"
+        f"<div class='pc-rot'>{_e(p['rotulo'])}{quem}</div>"
         f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div></div>{carimbo}</div>"
     )
 
@@ -1058,6 +1159,11 @@ def tela_cobranca():
     pct = int(round(100 * c["pago"] / total)) if total else 0
     selo = "<span class='sit c-ok'>Quitado</span>" if c["situacao"] == CLI_QUITADO else _chip_sit(c["situacao"])
     ate = f"Vai até <b>{nome_mes(c['ultima'])}</b>" if c["ultima"] else ""
+    quem = ""
+    if c["criada_por"] or c["criada_em"]:
+        por = f" por <b>{_e(c['criada_por'])}</b>" if c["criada_por"] else ""
+        em = f" em {data_br(c['criada_em'])}" if c["criada_em"] else ""
+        quem = f"<div class='fc-quem'>Cadastrada{por}{em}</div>"
     aviso_total = ""
     if c["valor_total"] and abs(conferir_total(c["valor_total"], [total])) >= 0.005:
         aviso_total = (f"<div class='fc-aviso'>O total combinado é {formatar_brl(c['valor_total'])}, "
@@ -1068,7 +1174,7 @@ def tela_cobranca():
         f"<div class='fc-nums'><div><b>{formatar_brl(c['pago'])}</b><span>Pago</span></div>"
         f"<div><b>{formatar_brl(c['falta'])}</b><span>Falta</span></div>"
         f"<div class='{'atr' if c['atrasado'] else ''}'><b>{formatar_brl(c['atrasado'])}</b><span>Atrasado</span></div>"
-        f"</div>{aviso_total}</div>",
+        f"</div>{aviso_total}{quem}</div>",
         unsafe_allow_html=True,
     )
     if c["observacoes"]:
@@ -1120,11 +1226,157 @@ def tela_excluidas():
                 st.rerun()
 
 
+# ── Notificações ──────────────────────────────────────────────────────────────
+
+def _token_bot() -> str:
+    return str(_segredo("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _usuario_do_bot(_token: str) -> str:
+    return avisos_telegram.nome_do_bot(_token)
+
+
+def _salvar_config(chave: str, valor: str) -> bool:
+    try:
+        _banco().save_config(chave, valor)
+        _config.clear()
+        return True
+    except Exception as e:
+        st.error(f"Não consegui salvar: {e}")
+        return False
+
+
+def _mudar_opcao_aviso(chave: str, widget: str):
+    _salvar_config(chave, "sim" if st.session_state.get(widget) else "nao")
+
+
+def tela_notificacoes():
+    _cabecalho("Notificações", voltar_para="inicio",
+               subtitulo="Avisos de cobrança no Telegram, todo dia às 7h30")
+    eu = _usuario()
+    cfg = _config()
+    token = _token_bot()
+    meu_chat = cfg.get(f"telegram:{eu}", "")
+
+    with st.container(key="sec_nt1"):
+        _titulo_secao(1, f"Celular de {eu}")
+        if _modo_demo():
+            _info("Na demonstração os avisos não são enviados. No app de verdade, aqui você liga "
+                  "o seu Telegram em três toques.", "cx-nota")
+        elif not token:
+            _info("O bot do Telegram ainda não foi ligado ao app (falta o token nos Secrets).", "cx-perigo")
+        elif meu_chat:
+            _info("<b>Telegram conectado.</b> Os avisos chegam neste celular.", "cx-ok")
+            st.toggle("Receber os avisos", key="nt_receber",
+                      value=chave_busca(cfg.get(f"avisos:{eu}", "")) != "nao",
+                      on_change=_mudar_opcao_aviso, args=(f"avisos:{eu}", "nt_receber"))
+            if st.button("Mandar um aviso de teste agora", key="nt_teste", icon=":material/send:",
+                         use_container_width=True):
+                try:
+                    cobs = _cobrancas() or []
+                    previa = notifier.montar_diario(cobs, _hoje(), opcoes_avisos(cfg))
+                    avisos_telegram.enviar(token, meu_chat,
+                                           "✅ <b>Teste dos avisos de cobrança</b>\nÉ assim que chega, todo dia às 7h30.\n\n"
+                                           + (previa or "Hoje não há nada atrasado, nem para cobrar hoje ou amanhã."))
+                    st.toast("Aviso de teste enviado. Olhe o Telegram.", icon="✅")
+                except Exception as e:
+                    st.error(f"O Telegram recusou: {e}")
+            if st.button("Desconectar este celular", key="nt_desconectar", type="tertiary",
+                         icon=":material/link_off:"):
+                if _salvar_config(f"telegram:{eu}", ""):
+                    _flash("Telegram desconectado")
+                    st.rerun()
+        else:
+            try:
+                bot = _usuario_do_bot(token)
+            except Exception as e:
+                bot = ""
+                st.error(f"Não consegui falar com o bot: {e}")
+            if bot:
+                codigo = st.session_state.setdefault("_nt_codigo", os.urandom(4).hex())
+                _info("Para receber os avisos neste celular:<br><b>1.</b> Abra o bot no Telegram"
+                      "<br><b>2.</b> Toque em <b>COMEÇAR</b> lá embaixo<br><b>3.</b> Volte aqui e confirme")
+                st.link_button("1. Abrir o bot no Telegram", avisos_telegram.link_para_conectar(bot, codigo),
+                               icon=":material/open_in_new:", use_container_width=True)
+                if st.button("3. Já toquei em Começar", key="nt_conectar", type="primary",
+                             icon=":material/check:", use_container_width=True):
+                    try:
+                        chat = avisos_telegram.achar_chat(token, codigo)
+                    except Exception as e:
+                        chat = None
+                        st.error(f"Não consegui falar com o Telegram: {e}")
+                    if chat and _salvar_config(f"telegram:{eu}", chat):
+                        _salvar_config(f"avisos:{eu}", "sim")
+                        st.session_state.pop("_nt_codigo", None)
+                        try:
+                            avisos_telegram.enviar(token, chat, f"✅ Avisos de cobrança ligados para <b>{_e(eu)}</b>. "
+                                                                "Eles chegam aqui todo dia às 7h30.")
+                        except Exception:
+                            pass
+                        _flash("Telegram conectado")
+                        st.rerun()
+                    elif not chat:
+                        _erro_campo("Ainda não vi o seu toque. Abra o bot pelo botão 1, toque em COMEÇAR "
+                                    "e confirme aqui de novo.")
+
+    with st.container(key="sec_nt2"):
+        _titulo_secao(2, "O que avisar")
+        st.caption("Vale para todo mundo que recebe.")
+        opcoes = opcoes_avisos(cfg)
+        for chave, rotulo in OPCOES_AVISO.items():
+            st.toggle(rotulo, key=f"nt_{chave}", value=opcoes[chave],
+                      on_change=_mudar_opcao_aviso, args=(chave, f"nt_{chave}"))
+
+    with st.container(key="sec_nt3"):
+        _titulo_secao(3, "Quem recebe")
+        recebem = dict(destinatarios(cfg))
+        for p in _pessoas():
+            if p in recebem:
+                estado = "<span class='sit c-ok'>Recebe</span>"
+            elif cfg.get(f"telegram:{p}"):
+                estado = "<span class='sit c-neutro'>Pausado</span>"
+            else:
+                estado = "<span class='sit c-neutro'>Sem Telegram</span>"
+            st.markdown(f"<div class='nt-pessoa'><span>{_e(p)}</span>{estado}</div>", unsafe_allow_html=True)
+        _info("Cada pessoa liga o próprio celular: abre o app com o nome dela e segue os 3 passos acima.", "cx-nota")
+
+
+# ── Feriados (piada interna; para tirar, apague esta tela, o botão e feriados.py) ──
+
+def tela_feriados():
+    hoje = _hoje()
+    _cabecalho("Feriados", voltar_para="inicio", subtitulo="Os feriados nacionais do Brasil")
+    prox = feriados.proximo(hoje)
+    if prox:
+        dias = (prox["data"] - hoje).days
+        quando = "é hoje" if dias == 0 else "é amanhã" if dias == 1 else f"faltam {dias} dias"
+        st.markdown(
+            f"<div class='fr-prox'><span>Próximo feriado</span><b>{_e(prox['nome'])}</b>"
+            f"<em>{prox['dia_semana']}, {data_br(prox['data'])} · {quando}</em></div>",
+            unsafe_allow_html=True)
+    ano = st.segmented_control("Ano", [hoje.year, hoje.year + 1], key="fr_ano", default=hoje.year,
+                               label_visibility="collapsed") or hoje.year
+    linhas = []
+    for f in feriados.feriados(ano):
+        classes = "fr" + ("" if f["nacional"] else " facultativo") + (" passou" if f["data"] < hoje else "")
+        etiqueta = (f"<span class='sit c-neutro'>{_e(f['obs'])}</span>" if f["nacional"]
+                    else "<span class='sit c-breve'>facultativo</span>")
+        linhas.append(
+            f"<div class='{classes}'><div class='fr-data'><b>{f['data'].day:02d}</b>"
+            f"<span>{MESES_ABREV[f['data'].month - 1]}</span></div>"
+            f"<div class='fr-corpo'><div class='fr-nome'>{_e(f['nome'])}</div>"
+            f"<div class='fr-dia'>{f['dia_semana']}</div></div>{etiqueta}</div>")
+    st.markdown("".join(linhas), unsafe_allow_html=True)
+    _info("<b>Facultativo</b> não é feriado nacional: Carnaval e Corpus Christi só são folga "
+          "onde a empresa libera ou onde há lei da cidade ou do estado.", "cx-nota")
+
+
 # ── Voltar do celular ─────────────────────────────────────────────────────────
 
 # Para onde cada tela volta com a setinha do aparelho ("inicio" sai do app).
 _TELA_PAI = {"nova": "inicio", "pix": "nova", "cartao": "nova", "relatorio": "inicio",
-             "excluidas": "inicio", "cobranca": None}
+             "excluidas": "inicio", "notificacoes": "inicio", "feriados": "inicio", "cobranca": None}
 
 
 def _voltar_do_celular():
@@ -1195,8 +1447,11 @@ telas = {
     "relatorio": tela_relatorio,
     "cobranca": tela_cobranca,
     "excluidas": tela_excluidas,
+    "notificacoes": tela_notificacoes,
+    "feriados": tela_feriados,
 }
 if st.session_state.tela not in telas:
     st.session_state.tela = "inicio"
-telas[st.session_state.tela]()
-_voltar_do_celular()
+if _identificado():
+    telas[st.session_state.tela]()
+    _voltar_do_celular()

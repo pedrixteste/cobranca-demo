@@ -14,6 +14,10 @@ on:
 
 jobs:
   avisar:
+    # O mesmo código vai para três repositórios (principal, demonstração e o do app
+    # publicado). Só o principal manda aviso; nos outros o job é pulado, senão
+    # falharia todo dia por falta de secrets.
+    if: github.repository == 'pedrixteste/cobranca-tracker'
     runs-on: ubuntu-latest
     # O job só lê o repositório; sem isso o token do Actions nasce podendo escrever.
     permissions:

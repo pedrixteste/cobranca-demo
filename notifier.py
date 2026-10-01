@@ -6,14 +6,16 @@ Avisos de cobrança no Telegram. Roda pelo GitHub Actions todo dia às 07:30 BRT
     Sem nada a avisar, não envia.
   - Segunda-feira: resumo da semana (o diário + o que vence até domingo +
     totais recebido / a receber / atrasado).
-  - Vai para TODOS os chats de TELEGRAM_CHAT_IDS (separados por vírgula):
-    as duas pessoas que cobram recebem a mesma mensagem.
+  - Vai para quem se conectou na tela Notificações do app (aba _Config,
+    chaves telegram:<nome>) e não pausou os avisos. TELEGRAM_CHAT_IDS, se
+    existir, é somado (jeito antigo, por secret).
+  - O que entra na mensagem segue as chaves avisar_* / resumo_semanal do _Config.
 
 Variáveis de ambiente:
   SPREADSHEET_ID       planilha
   GCP_SERVICE_ACCOUNT  JSON da conta de serviço (senão lê credentials.json)
   TELEGRAM_BOT_TOKEN   token do bot de COBRANÇAS (não é o bot do boleto)
-  TELEGRAM_CHAT_IDS    ex.: "123456789,987654321"
+  TELEGRAM_CHAT_IDS    opcional, ex.: "123456789,987654321"
   MODO                 auto (padrão) | diario | semanal
   DRY_RUN=1            imprime em vez de enviar
 
@@ -53,7 +55,12 @@ def ler_planilha(spreadsheet_id: str) -> dict:
     gc = gspread.authorize(Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES))
     abas = {ws.title: ws for ws in gc.open_by_key(spreadsheet_id).worksheets()}
     ler = lambda nome: nucleo.linhas_de_valores(abas[nome].get_all_values()) if nome in abas else []
-    return {"cobrancas": ler("_Cobrancas"), "parcelas": ler("_Parcelas")}
+    config = {}
+    if "_Config" in abas:
+        for linha in abas["_Config"].get_all_values()[1:]:
+            if len(linha) >= 2 and linha[0].strip():
+                config[linha[0].strip()] = linha[1].strip()
+    return {"cobrancas": ler("_Cobrancas"), "parcelas": ler("_Parcelas"), "config": config}
 
 
 # ── Texto ─────────────────────────────────────────────────────────────────────
@@ -81,8 +88,17 @@ def _secao(titulo: str, itens: list, hoje: date) -> list:
            [_linha(p, c, hoje) for p, c in itens]
 
 
-def montar_diario(cobs: list, hoje: date) -> str | None:
-    a = nucleo.avisos(cobs, hoje)
+def _filtrar(a: dict, opcoes: dict | None) -> dict:
+    """Esvazia as seções desligadas na tela Notificações."""
+    o = opcoes or {}
+    return {"atrasadas": a["atrasadas"] if o.get("avisar_atrasadas", True) else [],
+            "hoje": a["hoje"] if o.get("avisar_hoje", True) else [],
+            "amanha": a["amanha"] if o.get("avisar_amanha", True) else [],
+            "semana": a["semana"]}
+
+
+def montar_diario(cobs: list, hoje: date, opcoes: dict | None = None) -> str | None:
+    a = _filtrar(nucleo.avisos(cobs, hoje), opcoes)
     if not (a["atrasadas"] or a["hoje"] or a["amanha"]):
         return None
     linhas = [f"📋 <b>Cobranças · {DIAS_SEMANA[hoje.weekday()]}, {hoje.strftime('%d/%m/%Y')}</b>"]
@@ -92,8 +108,8 @@ def montar_diario(cobs: list, hoje: date) -> str | None:
     return "\n".join(linhas)
 
 
-def montar_semanal(cobs: list, hoje: date) -> str:
-    a = nucleo.avisos(cobs, hoje)
+def montar_semanal(cobs: list, hoje: date, opcoes: dict | None = None) -> str:
+    a = _filtrar(nucleo.avisos(cobs, hoje), opcoes)
     domingo = nucleo.inicio_semana(hoje) + timedelta(days=6)
     linhas = [f"🗓️ <b>Cobranças da semana · {hoje.strftime('%d/%m')} a {domingo.strftime('%d/%m/%Y')}</b>"]
     linhas += _secao("🔴 <b>Atrasadas</b>", a["atrasadas"], hoje)
@@ -181,7 +197,11 @@ def main() -> int:
     print(f"Cobranças {len(cobs)} | atrasadas {len(a['atrasadas'])} | hoje {len(a['hoje'])} | "
           f"amanhã {len(a['amanha'])} | resto da semana {len(a['semana'])}")
 
-    texto = montar_semanal(cobs, hoje) if modo == "semanal" else montar_diario(cobs, hoje)
+    opcoes = nucleo.opcoes_avisos(dados["config"])
+    if modo == "semanal" and not opcoes["resumo_semanal"]:
+        print("Resumo semanal desligado na tela Notificações: vai o aviso diário.")
+        modo = "diario"
+    texto = montar_semanal(cobs, hoje, opcoes) if modo == "semanal" else montar_diario(cobs, hoje, opcoes)
     if not texto:
         print("Nada atrasado, nada para hoje nem amanhã. Nenhuma mensagem enviada.")
         return 0
@@ -191,10 +211,15 @@ def main() -> int:
         return 0
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if c.strip()]
-    if not token or not chats:
-        print("Telegram não configurado: faltam TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_IDS nos secrets.")
+    chats = [chat for _, chat in nucleo.destinatarios(dados["config"])]
+    chats += [c.strip() for c in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if c.strip()]
+    chats = list(dict.fromkeys(chats))   # sem repetir, mantendo a ordem
+    if not token:
+        print("Telegram não configurado: falta TELEGRAM_BOT_TOKEN nos secrets.")
         return 1
+    if not chats:
+        print("Ninguém conectou o Telegram ainda (tela Notificações do app). Nenhuma mensagem enviada.")
+        return 0
     ok = True
     for i, chat in enumerate(chats, start=1):
         print(f"Enviando para a pessoa {i} de {len(chats)}")

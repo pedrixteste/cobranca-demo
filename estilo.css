@@ -265,6 +265,10 @@ header[data-testid="stHeader"] { display: none; }
 .fc-nums div:first-child b, .fc-nums div:first-child span { color: var(--ok); }
 .fc-nums .atr b, .fc-nums .atr span { color: var(--atraso); }
 .fc-aviso { margin-top: 8px; font-size: .8rem; color: var(--breve); }
+.fc-quem  { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--linha); font-size: .8rem; color: var(--apoio); }
+.fc-quem b { color: var(--tinta); font-weight: 600; }
+.pc-quem  { font-size: .78rem; color: var(--ok-texto); }
+.st-key-btn_trocar_pessoa button { color: var(--apoio); }
 
 .dl-cab { margin-bottom: 6px; }
 .dl-cab b { display: block; font-size: 1.05rem; color: var(--tinta); }
@@ -289,3 +293,32 @@ header[data-testid="stHeader"] { display: none; }
 [data-testid="stFileUploaderDropzone"] button[data-testid="stBaseButton-secondary"] [data-has-shortcut]::after {
     content: "Escolher arquivo"; font-size: .9rem; font-weight: 600; margin-left: .35rem;
 }
+
+/* ── Notificações e Feriados ─────────────────────────────────────────────── */
+
+.st-key-btn_notificacoes button, .st-key-btn_feriados button { color: var(--apoio); }
+.nt-pessoa { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+             padding: 7px 0; border-top: 1px solid var(--linha); color: var(--tinta); font-weight: 600; }
+.nt-pessoa:first-of-type { border-top: 0; }
+
+.fr-prox { background: linear-gradient(135deg, #F8EBAE 0%, #F2DD82 55%, #E6CC62 100%); color: var(--sobre-marca);
+           border-radius: 18px; padding: 14px 16px; margin: 2px 0 10px; }
+.fr-prox span { display: block; font-family: var(--mono); font-size: .68rem; font-weight: 700;
+                letter-spacing: .09em; text-transform: uppercase; }
+.fr-prox b    { display: block; font-family: var(--display); font-weight: 800; font-size: 1.3rem;
+                line-height: 1.15; margin: 3px 0 2px; }
+.fr-prox em   { font-style: normal; font-size: .9rem; }
+.fr       { display: flex; align-items: center; gap: 12px; background: var(--cartao); border: 1px solid var(--linha);
+            border-radius: 14px; padding: 9px 12px; margin-bottom: 7px; }
+.fr-data  { width: 46px; flex: none; text-align: center; background: var(--marca-bg); color: var(--marca-2);
+            border-radius: 10px; padding: 5px 0; font-family: var(--mono); }
+.fr-data b    { display: block; font-family: var(--display); font-weight: 800; font-size: 1.2rem; line-height: 1; }
+.fr-data span { font-size: .62rem; font-weight: 700; letter-spacing: .08em; }
+.fr-corpo { flex: 1; min-width: 0; }
+.fr-nome  { font-weight: 700; color: var(--tinta); line-height: 1.25; overflow-wrap: anywhere; }
+.fr-dia   { font-size: .82rem; color: var(--apoio); }
+/* já passou: o cartão recua, mas o texto continua legível (nada de opacidade no texto) */
+.fr.passou { background: transparent; border-style: dashed; }
+.fr.passou .fr-nome { color: var(--apoio); font-weight: 600; }
+.fr.passou .fr-data { background: var(--neutro-bg); color: var(--neutro); }
+.fr.facultativo .fr-data { background: var(--breve-bg); color: var(--breve); }

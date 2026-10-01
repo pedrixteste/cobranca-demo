@@ -15,6 +15,18 @@ def esperar(page, ms=2500):
     page.wait_for_timeout(500)
 
 
+def abrir(page, espera=5000):
+    """Abre o app já identificado como 'Robo'; na 1ª vez passa pela tela 'Quem está usando?'."""
+    page.goto(URL.rstrip("/") + "/?quem=Robo")
+    esperar(page, espera)
+    campo_nome = page.locator("input[aria-label='Seu nome'], input[aria-label='Outra pessoa']")
+    if campo_nome.count():
+        if "auditar" in globals():
+            auditar(page, "00_quem_esta_usando")
+        campo_nome.first.fill("Robo")
+        page.locator("button:visible", has_text="Entrar").first.click()
+        esperar(page, 3000)
+
 def tocar(page, sel):
     box = page.locator(sel).first.bounding_box()
     page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -40,8 +52,7 @@ with sync_playwright() as p:
     b = p.chromium.launch()
     ctx = b.new_context(**p.devices["Pixel 5"])
     page = ctx.new_page()
-    page.goto(URL)
-    esperar(page, 6000)
+    abrir(page, 6000)
     conferir(page, "INICIO", "abriu")
     tocar(page, ".st-key-hm_rel .hm-card")
     conferir(page, "Relatório de cobranças", "tocou relatório")

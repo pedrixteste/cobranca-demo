@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import feriados as fer  # noqa: E402
 import nucleo as n  # noqa: E402
 import notifier  # noqa: E402
 
@@ -122,6 +123,13 @@ class Situacao(unittest.TestCase):
                          parc("a1", 1, "05/10/2026", "1000,00")], tipo="Cartão")
         self.assertEqual([p["rotulo"] for p in c["parcelas"]], ["Já pago antes", "Cartão 1 de 1"])
 
+    def test_quem_cadastrou_e_quem_marcou(self):
+        c = n.montar_cobrancas([{**cob(), "Criada por": "Pedro"}],
+                               [{**parc("a1", 1, "20/09/2026", "500,00", "Paga", "19/09/2026"), "Marcado por": "Ana"}],
+                               HOJE)[0]
+        self.assertEqual(c["criada_por"], "Pedro")
+        self.assertEqual(c["parcelas"][0]["marcado_por"], "Ana")
+
     def test_excluida_some(self):
         cobs = n.montar_cobrancas([cob(sit="Excluída")], [parc("a1", 1, "01/09/2026", "1,00")], HOJE)
         self.assertEqual(cobs, [])
@@ -189,6 +197,50 @@ class Telegram(unittest.TestCase):
         cobs = n.montar_cobrancas([cob()], [parc("a1", 1, "20/10/2026", "450,00")], HOJE)
         self.assertIsNone(notifier.montar_diario(cobs, HOJE))
         self.assertIn("A receber: R$ 450,00", notifier.montar_semanal(cobs, HOJE))
+
+
+class Notificacoes(unittest.TestCase):
+    CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
+           "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}
+
+    def test_destinatarios_respeita_pausa_e_sem_chat(self):
+        self.assertEqual(n.destinatarios(self.CFG), [("Pedro", "111")])
+
+    def test_opcoes_comecam_ligadas(self):
+        self.assertEqual(n.opcoes_avisos({}), {k: True for k in n.OPCOES_AVISO})
+        self.assertFalse(n.opcoes_avisos(self.CFG)["avisar_amanha"])
+
+    def test_secao_desligada_some_da_mensagem(self):
+        cobs = n.montar_cobrancas([cob()], [parc("a1", 1, "28/09/2026", "450,00"),
+                                            parc("a1", 2, "01/10/2026", "450,00")], HOJE)
+        txt = notifier.montar_diario(cobs, HOJE, n.opcoes_avisos(self.CFG))
+        self.assertIn("Atrasadas", txt)
+        self.assertNotIn("Cobrar amanhã", txt)
+        so_amanha = n.montar_cobrancas([cob()], [parc("a1", 1, "01/10/2026", "450,00")], HOJE)
+        self.assertIsNone(notifier.montar_diario(so_amanha, HOJE, n.opcoes_avisos(self.CFG)))
+
+
+class Feriados(unittest.TestCase):
+    def test_pascoa(self):
+        self.assertEqual(fer.pascoa(2026), date(2026, 4, 5))
+        self.assertEqual(fer.pascoa(2027), date(2027, 3, 28))
+        self.assertEqual(fer.pascoa(2025), date(2025, 4, 20))
+
+    def test_nacionais_de_2026(self):
+        nac = [(f["data"], f["nome"]) for f in fer.feriados(2026) if f["nacional"]]
+        self.assertEqual(len(nac), 10)
+        self.assertIn((date(2026, 4, 3), "Sexta-feira Santa (Paixão de Cristo)"), nac)
+        self.assertIn((date(2026, 11, 20), "Dia da Consciência Negra"), nac)
+        self.assertEqual([d for d, _ in nac], sorted(d for d, _ in nac))
+
+    def test_facultativos(self):
+        fac = {f["nome"]: f["data"] for f in fer.feriados(2026) if not f["nacional"]}
+        self.assertEqual(fac["Carnaval (terça)"], date(2026, 2, 17))
+        self.assertEqual(fac["Corpus Christi"], date(2026, 6, 4))
+
+    def test_proximo(self):
+        self.assertEqual(fer.proximo(HOJE)["nome"], "Nossa Senhora Aparecida")
+        self.assertEqual(fer.proximo(date(2026, 12, 26))["data"], date(2027, 1, 1))
 
 
 if __name__ == "__main__":

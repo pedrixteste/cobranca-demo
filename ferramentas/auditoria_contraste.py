@@ -105,6 +105,18 @@ def auditar(page, nome):
     print(f"{nome:28s} textos {r['total']:3d} | fracos {len(r['ruins'])}")
 
 
+def abrir(page, espera=5000):
+    """Abre o app já identificado como 'Robo'; na 1ª vez passa pela tela 'Quem está usando?'."""
+    page.goto(URL.rstrip("/") + "/?quem=Robo")
+    esperar(page, espera)
+    campo_nome = page.locator("input[aria-label='Seu nome'], input[aria-label='Outra pessoa']")
+    if campo_nome.count():
+        if "auditar" in globals():
+            auditar(page, "00_quem_esta_usando")
+        campo_nome.first.fill("Robo")
+        page.locator("button:visible", has_text="Entrar").first.click()
+        esperar(page, 3000)
+
 def tocar(page, sel):
     box = page.locator(sel).first.bounding_box()
     page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -124,8 +136,10 @@ with sync_playwright() as p:
     b = p.chromium.launch()
     dev = dict(p.devices["Pixel 5"]); dev["viewport"] = {"width": 393, "height": 1700}
     page = b.new_context(**dev).new_page()
-    page.goto(URL); esperar(page, 7000)
-    botao(page, "Recomeçar o exemplo do zero")
+    abrir(page, 7000)
+    if page.locator("button:visible", has_text="Recomeçar o exemplo do zero").count():
+        botao(page, "Recomeçar o exemplo do zero")
+        abrir(page)
     auditar(page, "01_inicio")
 
     tocar(page, ".st-key-hm_nova .hm-card"); auditar(page, "02_nova")
@@ -155,7 +169,7 @@ with sync_playwright() as p:
         print("não abriu o calendário:", type(e).__name__)
     page.keyboard.press("Escape"); esperar(page, 500)
 
-    page.goto(URL); esperar(page, 5000)
+    abrir(page)
     tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_cartao .hm-card")
     campo(page, "Valor total").fill("10000"); campo(page, "Valor que já foi pago").fill("2000")
     campo(page, "Em quantas vezes vai passar?").fill("20"); campo(page, "Em quantas vezes vai passar?").press("Enter"); esperar(page)
@@ -163,7 +177,7 @@ with sync_playwright() as p:
     auditar(page, "10_cartao_20_datas")
     botao(page, "Salvar cobrança"); auditar(page, "11_cartao_erros")
 
-    page.goto(URL); esperar(page, 5000)
+    abrir(page)
     tocar(page, ".st-key-hm_rel .hm-card"); auditar(page, "12_relatorio")
     page.get_by_text("Filtros", exact=True).first.click(); esperar(page)
     page.locator("[data-testid=stExpander] button", has_text="Atrasado").first.click(); esperar(page)
@@ -189,11 +203,19 @@ with sync_playwright() as p:
     botao(page, "Excluir"); auditar(page, "25_dlg_excluir")
     botao(page, "Sim, excluir", "[role=dialog]"); auditar(page, "26_depois_excluir_toast")
 
-    page.goto(URL); esperar(page, 5000)
+    abrir(page)
     botao(page, "Cobranças excluídas"); auditar(page, "27_excluidas")
-    page.goto(URL); esperar(page, 5000)
+    abrir(page)
     page.get_by_text("Grande", exact=True).first.click(); esperar(page); auditar(page, "28_inicio_letra_grande")
     page.get_by_text("Médio", exact=True).first.click(); esperar(page)
+
+    botao(page, "Notificações"); auditar(page, "29_notificacoes")
+    abrir(page)
+    botao(page, "Feriados"); auditar(page, "30_feriados")
+    page.get_by_text(str(__import__("datetime").date.today().year + 1), exact=True).first.click(); esperar(page)
+    auditar(page, "31_feriados_ano_que_vem")
+    abrir(page)
+    botao(page, "Usando como"); auditar(page, "32_trocar_pessoa")
     b.close()
 
 print("\n==== TEXTOS COM POUCO CONTRASTE ====")

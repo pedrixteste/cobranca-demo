@@ -9,3 +9,7 @@ __pycache__/
 .env
 # Arquivo do modo de teste local (COBRANCA_LOCAL)
 *.local.json
+
+# Fotos dos testes de tela
+.fotos_teste/
+ferramentas/fotos_noite/
