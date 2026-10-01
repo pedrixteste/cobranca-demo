@@ -1,0 +1,69 @@
+name: Backup da planilha de cobranças
+
+on:
+  schedule:
+    # 07:40, 13:00 e 19:00 BRT (Brasil não tem horário de verão desde 2020)
+    - cron: '40 10 * * *'
+    - cron: '0 16 * * *'
+    - cron: '0 22 * * *'
+  workflow_dispatch:   # Permite rodar na mão pela aba Actions do GitHub
+  push:
+    # Mexeu no backup, roda na hora: prova que continua funcionando
+    branches: [master]
+    paths: ['backup.py', '.github/workflows/backup.yml']
+
+# Duas rodadas ao mesmo tempo brigariam para gravar no cofre
+concurrency:
+  group: backup-cobrancas
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    # O mesmo código vai para três repositórios (principal, demonstração e o do app
+    # publicado). Só o principal, que é privado, guarda backup; nos outros o job é pulado.
+    if: github.repository == 'pedrixteste/cobranca-tracker'
+    runs-on: ubuntu-latest
+    # Precisa escrever no repositório: o cofre é o ramo "backup" deste mesmo repositório
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Checkout do cofre (ramo backup)
+        uses: actions/checkout@v4
+        with:
+          ref: backup
+          path: cofre
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install "gspread>=6,<7" "google-auth>=2.20,<3" "google-api-python-client>=2,<3" "openpyxl>=3.1,<4" tzdata
+
+      - name: Copiar a planilha (cofre do GitHub + Drive da empresa)
+        env:
+          SPREADSHEET_ID:      ${{ secrets.SPREADSHEET_ID }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          DRIVE_OAUTH:         ${{ secrets.DRIVE_OAUTH }}
+        run: python backup.py --pasta cofre --drive
+
+      # Roda mesmo se o passo anterior acusou erro (planilha encolheu, Drive fora do ar):
+      # a cópia que foi feita tem que ser guardada de qualquer jeito.
+      - name: Guardar no cofre
+        if: always()
+        working-directory: cofre
+        run: |
+          git config user.name "Backup automático"
+          git config user.email "backup@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nada novo para guardar."
+          else
+            git commit -q -m "backup $(TZ=America/Sao_Paulo date '+%d/%m/%Y %H:%M')"
+            git push -q
+            echo "Cópia guardada no cofre."
+          fi
