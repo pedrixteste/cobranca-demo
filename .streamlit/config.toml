@@ -1,12 +1,12 @@
 [theme]
 base = "light"
-primaryColor = "#9A7310"
-backgroundColor = "#F5F1E8"
+primaryColor = "#553098"
+backgroundColor = "#F3F1F7"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#1B2A3A"
 font = "sans serif"
 baseRadius = "0.75rem"
-borderColor = "#E3DCCB"
+borderColor = "#DDD8E6"
 showWidgetBorder = true
 
 [server]

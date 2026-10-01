@@ -1,28 +1,27 @@
 /* ── Visual do app de cobranças ────────────────────────────────────────────────
    Mesma família do app de contas (boleto-tracker), mas com a cor principal
-   DOURADA e papel creme, para ninguém confundir os dois no celular.
+   ROXA (o boleto é verde), para ninguém confundir os dois no celular.
    Conceito: cada parcela é uma folha de CARNÊ (bloco da data à esquerda) e a
    paga leva um carimbo PAGO / PASSOU.
    Cores de situação (iguais em parcela, cliente e resumo):
      verde  = pago / em dia     cinza   = em aberto, ainda não venceu
-     laranja = vence em breve   vermelho = atrasado
-   (o "em breve" é laranja e não amarelo para não se confundir com o dourado da marca) */
+     amarelo = vence em breve   vermelho = atrasado */
 
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
 
 :root {
     --tinta:   #1B2A3A;
     --apoio:   #5E6B75;
-    --papel:   #F5F1E8;
+    --papel:   #F3F1F7;
     --cartao:  #FFFFFF;
-    --linha:   #E3DCCB;
-    --marca:   #C39A2E;   /* dourado */
-    --marca-2: #6E520C;   /* dourado escuro, para texto */
-    --marca-bg: #F6EBCB;  /* dourado bem claro, para fundos */
-    --sobre-marca: #2A2008; /* texto em cima do dourado */
+    --linha:   #DDD8E6;
+    --marca:   #553098;   /* roxo */
+    --marca-2: #3B1F6E;   /* roxo escuro, para texto */
+    --marca-bg: #ECE5F6;  /* roxo bem claro, para fundos */
+    --sobre-marca: #FFFFFF; /* texto em cima do roxo */
     --ok:      #1E8A5A;  --ok-bg:     #DFF1E7;  --ok-leve:     #F1FAF5;
     --atraso:  #C4432B;  --atraso-bg: #F7E3DF;  --atraso-leve: #FDF3F0;
-    --breve:   #B4530A;  --breve-bg:  #FDE6D0;  --breve-leve:  #FFF6EC;  --breve-cor: #E8791A;
+    --breve:   #9A6512;  --breve-bg:  #FBEFD9;  --breve-leve:  #FFF9EE;  --breve-cor: #D69A2D;
     --neutro:  #5E6B75;  --neutro-bg: #E9EDF1;
     --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
     --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -37,9 +36,9 @@ header[data-testid="stHeader"] { display: none; }
 }
 .stButton button { min-height: 2.8rem; border-radius: 12px; font-weight: 600; }
 .stButton button p { font-weight: 600; }
-/* Botão principal dourado com letra escura (branco em cima de dourado não dá leitura) */
-[data-testid="stBaseButton-primary"] { background: linear-gradient(180deg, #D4AE45, #C39A2E) !important;
-    border-color: #AE8420 !important; color: var(--sobre-marca) !important; }
+/* Botão principal na cor da marca */
+[data-testid="stBaseButton-primary"] { background: var(--marca) !important;
+    border-color: var(--marca-2) !important; color: var(--sobre-marca) !important; }
 [data-testid="stBaseButton-primary"] p, [data-testid="stBaseButton-primary"] span { color: var(--sobre-marca) !important; }
 [data-testid="stBaseButton-primary"]:active { filter: brightness(.94); }
 
@@ -58,7 +57,7 @@ header[data-testid="stHeader"] { display: none; }
     * { transition: none !important; animation: none !important; }
 }
 
-.demo-faixa { background: var(--marca-bg); color: var(--marca-2); border: 1px dashed var(--marca); border-radius: 12px;
+.demo-faixa { background: #FBEFD9; color: #6B4A12; border: 1px dashed #D69A2D; border-radius: 12px;
               padding: 8px 12px; font-size: .84rem; margin-bottom: .4rem; }
 .st-key-btn_demo_reset button { color: var(--apoio); }
 
@@ -106,18 +105,18 @@ header[data-testid="stHeader"] { display: none; }
 .hm-card  { display: flex; gap: 14px; align-items: center; border-radius: 22px;
             padding: 18px 16px; min-height: 110px; transition: transform .12s ease; }
 .hm-card.claro  { background: var(--cartao); border: 1px solid var(--linha); color: var(--tinta); }
-.hm-card.escuro { background: linear-gradient(135deg, #DDB850 0%, #C39A2E 55%, #AE8420 100%); color: var(--sobre-marca); }
+.hm-card.escuro { background: linear-gradient(135deg, #6A42B0 0%, #553098 55%, #452583 100%); color: var(--sobre-marca); }
 .hm-ico   { width: 50px; height: 50px; border-radius: 15px; display: grid; place-items: center; flex: none; }
 .hm-ico svg { width: 26px; height: 26px; }
-.claro  .hm-ico { background: var(--marca-bg); color: var(--marca-2); }
-.escuro .hm-ico { background: rgba(255,255,255,.32); color: var(--sobre-marca); }
+.claro  .hm-ico { background: var(--marca-bg); color: var(--marca); }
+.escuro .hm-ico { background: rgba(255,255,255,.15); color: var(--sobre-marca); }
 .hm-txt   { flex: 1; min-width: 0; }
 .hm-tit   { font-family: var(--display); font-weight: 800; font-size: 1.25rem; letter-spacing: -.01em; line-height: 1.1; }
 .hm-desc  { font-size: .9rem; opacity: .75; margin-top: 3px; }
 .hm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .hm-chip  { font-size: .78rem; font-weight: 600; padding: 4px 10px; border-radius: 99px;
-            background: rgba(255,255,255,.38); color: var(--sobre-marca); }
-.hm-chip.atraso { background: var(--atraso); color: #fff; }
+            background: rgba(255,255,255,.17); color: var(--sobre-marca); }
+.hm-chip.atraso { background: #F6D3CC; color: #8E2A18; }
 .hm-seta  { flex: none; opacity: .45; }
 .hm-seta svg { width: 22px; height: 22px; }
 .st-key-btn_excluidas button { color: var(--apoio); }
