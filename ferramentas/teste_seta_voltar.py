@@ -9,7 +9,8 @@ falhas = []
 def esperar(page, ms=2500):
     page.wait_for_timeout(ms)
     for _ in range(40):
-        if not page.locator("[data-testid=stStatusWidget]").count():
+        # pronto = sem o indicador de "rodando" E sem pedaço da tela anterior ainda esmaecido
+        if not page.locator("[data-testid=stStatusWidget]").count() and not page.locator("[data-stale=true]").count():
             break
         page.wait_for_timeout(250)
     page.wait_for_timeout(500)

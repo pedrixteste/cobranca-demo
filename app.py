@@ -1,6 +1,7 @@
 import html as _html
 import json
 import os
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,7 +16,8 @@ import avisos_telegram
 import feriados
 import notifier
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
-                    destinatarios, opcoes_avisos,
+                    administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
+                    MAX_VEZES_CARTAO, opcoes_avisos, pessoas_da_config, texto_vezes,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
@@ -339,8 +341,14 @@ def tela_inicio():
         if st.button("Feriados", key="btn_feriados", icon=":material/beach_access:", type="tertiary"):
             _ir("feriados")
 
-    if _usuario() and st.button(f"Usando como {_usuario()} · trocar", key="btn_trocar_pessoa",
-                                icon=":material/person:", type="tertiary"):
+    if _sou_admin() and st.button("Configurações", key="btn_config", icon=":material/settings:",
+                                  type="tertiary"):
+        _ir("config")
+
+    if _usuario() and _travado():
+        st.markdown(f"<div class='hm-quem'>Usando como <b>{_e(_usuario())}</b></div>", unsafe_allow_html=True)
+    elif _usuario() and st.button(f"Usando como {_usuario()} · trocar", key="btn_trocar_pessoa",
+                                  icon=":material/person:", type="tertiary"):
         st.session_state.pop("_quem", None)
         st.session_state["_trocando"] = True
         st.rerun()
@@ -349,69 +357,169 @@ def tela_inicio():
                                   icon=":material/refresh:", type="tertiary"):
         banco_demo(_hoje(), recomecar=True)
         _invalidar()
+        _config.clear()
         _flash("Exemplo recomeçado")
         st.rerun()
 
 
 # ── Quem está usando ──────────────────────────────────────────────────────────
 # O app é uma conta só para todo mundo, mas cada cobrança guarda QUEM cadastrou
-# e cada pagamento guarda QUEM marcou. Não é senha (quem entra no app já passou
-# pelo login do Streamlit): é só um nome para o registro.
-# A pessoa é reconhecida, nesta ordem, por: (1) o endereço com ?quem=Nome, que
-# o app coloca sozinho depois da 1ª escolha; (2) o e-mail do login, se o
-# Streamlit informar, ligado ao nome na aba _Config. Sem nenhum dos dois, pergunta.
+# e cada pagamento guarda QUEM marcou.
+#
+# O Streamlit Cloud não informa o e-mail de quem está logado, então a trava é
+# por APARELHO: na primeira vez a pessoa escolhe o nome e aquele aparelho fica
+# preso nele (regras em nucleo.py, seção "Pessoas e aparelhos"). Para trocar,
+# só pelo administrador, na tela Configurações.
+#
+# O aparelho é reconhecido por um código guardado em DOIS lugares:
+#   - cookie `cob_dev`  (vale para o atalho que a pessoa já tem na tela do celular)
+#   - `?a=<código>` no endereço (o iPhone apaga cookie de site depois de 7 dias
+#     sem uso; com o código no endereço o atalho continua funcionando)
+# Na demonstração não há trava: qualquer um digita um nome e pode trocar.
 
 MAX_NOME = 30
+COOKIE_APARELHO = "cob_dev"
+
+
+def _travado() -> bool:
+    return not _modo_demo()
 
 
 def _pessoas() -> list:
-    return [p.strip() for p in _config().get("pessoas", "").split(",") if p.strip()]
+    return pessoas_da_config(_config())
 
 
-def _entrar_como(nome: str, pessoas: list):
-    nome = " ".join(nome.replace(",", " ").split())[:MAX_NOME]   # vírgula separa a lista em _Config
-    existente = next((p for p in pessoas if chave_busca(p) == chave_busca(nome)), None)
+def _sou_admin() -> bool:
+    return bool(_usuario()) and _usuario() == administrador(_config())
+
+
+def _codigo_limpo(v) -> str:
+    v = re.sub(r"[^a-f0-9]", "", str(v or "").lower())
+    return v if 16 <= len(v) <= 64 else ""
+
+
+def _aparelho() -> str:
+    """Código deste aparelho: o do endereço, senão o do cookie. '' se ainda não tem nenhum."""
+    do_endereco = _codigo_limpo(st.query_params.get("a", ""))
     try:
+        do_cookie = _codigo_limpo(st.context.cookies.get(COOKIE_APARELHO, ""))
+    except Exception:
+        do_cookie = ""
+    return do_endereco or do_cookie
+
+
+def _script_aparelho(codigo: str = ""):
+    """
+    Grava (ou renova) o cookie do aparelho. Sem `codigo`, cria um novo e recarrega
+    a página uma vez, para o Python enxergar o cookie. Se o navegador bloquear
+    cookies, troca o texto de espera por um aviso.
+    """
+    _iframe_invisivel("""
+<script>
+const P = window.parent, FIXO = "%s";
+const ler = () => { const m = P.document.cookie.match(/(?:^|; )cob_dev=([a-f0-9]+)/); return m ? m[1] : ""; };
+const gravar = id => { P.document.cookie = "cob_dev=" + id + "; path=/; max-age=63072000; SameSite=Lax" +
+                                           (P.location.protocol === "https:" ? "; Secure" : ""); };
+let id = FIXO || ler();
+const novo = !id;
+if (novo) { const a = new Uint8Array(12); crypto.getRandomValues(a);
+            id = Array.from(a, b => b.toString(16).padStart(2, "0")).join(""); }
+gravar(id);   // também renova a validade a cada visita
+if (novo) {
+  const n = parseInt(P.sessionStorage.getItem("cob_dev_recarga") || "0");
+  if (ler() && n < 2) { P.sessionStorage.setItem("cob_dev_recarga", n + 1); P.location.reload(); }
+  else { const e = P.document.querySelector(".dev-espera");
+         if (e) e.textContent = "Este navegador está bloqueando cookies. Libere os cookies deste site ou abra em outro navegador."; }
+}
+</script>
+""" % codigo)
+
+
+def _renovar_cookie_do_aparelho():
+    """
+    Uma vez por sessão: deixa o cookie igual ao código do endereço e renova a validade.
+    Fica no FIM da página de propósito: um elemento que só existe na 1ª rodada, se ficar
+    no topo, desloca todos os outros e o Streamlit deixa pedaços apagados da tela anterior
+    (ferramentas/auditoria_contraste.py acusa como FANTASMAS).
+    """
+    aparelho = _aparelho()
+    if aparelho and not st.session_state.get("_aparelho_ok"):
+        st.session_state["_aparelho_ok"] = True
+        _script_aparelho(aparelho)
+
+
+def _prender(aparelho: str, nome: str, pessoas: list):
+    """Prende este aparelho no nome (criando a pessoa, se for nova) e entra."""
+    nome = " ".join(nome.replace(",", " ").replace(":", " ").split())[:MAX_NOME]
+    existente = next((p for p in pessoas if chave_busca(p) == chave_busca(nome)), None)
+    final = existente or nome
+    try:
+        b = _banco()
         if not existente:
-            _banco().save_config("pessoas", ", ".join(pessoas + [nome]))
-        email = _email_login()
-        if email:
-            _banco().save_config(f"pessoa_de:{email}", existente or nome)
+            b.save_config("pessoas", ", ".join(pessoas + [final]))
+        b.save_config(f"aparelho:{aparelho}", final)
+        if chave_busca(_config().get(f"liberado:{final}", "")) == "sim":
+            b.save_config(f"liberado:{final}", "")   # a liberação vale para UM aparelho
         _config.clear()
     except Exception as e:
-        st.error(f"Não consegui guardar o nome: {e}")
+        st.error(f"Não consegui guardar: {e}")
         return
-    st.session_state["_quem"] = existente or nome
+    st.session_state["_quem"] = final
     st.session_state.pop("_trocando", None)
-    st.query_params["quem"] = existente or nome
+    if "quem" in st.query_params:
+        del st.query_params["quem"]
+    st.query_params["a"] = aparelho
     st.rerun()
 
 
 def _identificado() -> bool:
-    """True se já se sabe quem está usando; senão mostra a tela de escolha e devolve False."""
+    """True se já se sabe quem está usando; senão mostra a tela certa e devolve False."""
     if st.session_state.get("_quem"):
         return True
     if _banco() is None:
         return True   # sem planilha configurada: a tela inicial mostra o erro
-    pessoas = _pessoas()
-    if not st.session_state.get("_trocando"):
-        pedido = chave_busca(st.query_params.get("quem", ""))
-        achada = next((p for p in pessoas if pedido and chave_busca(p) == pedido), None)
-        if not achada:
-            email = _email_login()
-            do_email = _config().get(f"pessoa_de:{email}") if email else None
-            achada = do_email if do_email in pessoas else None
-        if achada:
-            st.session_state["_quem"] = achada
-            return True
 
-    st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Quem está usando?</div>"
-                "<div class='cx-sub'>Fica registrado quem cadastrou cada cobrança e quem marcou "
-                "cada pagamento.</div>", unsafe_allow_html=True)
-    for i, p in enumerate(pessoas):
+    aparelho = _aparelho()
+    if not aparelho:
+        st.markdown("<div class='dev-espera cx-sub' style='margin-top:1.2rem'>Preparando este aparelho…</div>",
+                    unsafe_allow_html=True)
+        _script_aparelho()
+        return False
+    if st.query_params.get("a") != aparelho:
+        st.query_params["a"] = aparelho     # o atalho salvo depois disso já leva o código
+
+    cfg = _config()
+    trocando = st.session_state.get("_trocando")
+    nome = nome_do_aparelho(cfg, aparelho)
+    if nome and not trocando:
+        st.session_state["_quem"] = nome
+        return True
+
+    travado = _travado()
+    pessoas = pessoas_da_config(cfg)
+    livres = nomes_livres(cfg) if travado else pessoas
+    # Atalho antigo, de antes da trava (?quem=Nome): entra direto e já prende o aparelho
+    pedido = chave_busca(st.query_params.get("quem", ""))
+    do_atalho = next((p for p in livres if pedido and chave_busca(p) == pedido), None)
+    if do_atalho and not trocando:
+        _prender(aparelho, do_atalho, pessoas)
+        return False
+
+    st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Quem está usando?</div>", unsafe_allow_html=True)
+    if travado and pessoas:
+        st.markdown("<div class='cx-sub'>Escolha o seu nome. Este aparelho fica ligado a ele e não dá "
+                    "para trocar depois.</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='cx-sub'>Fica registrado quem cadastrou cada cobrança e quem marcou "
+                    "cada pagamento.</div>", unsafe_allow_html=True)
+    for i, p in enumerate(livres):
         if st.button(p, key=f"quem_{i}", icon=":material/person:", use_container_width=True):
-            _entrar_como(p, pessoas)
-    with st.container(key="sec_quem"):
+            _prender(aparelho, p, pessoas)
+
+    if not travado or not pessoas:
+        # Demonstração, ou a primeiríssima pessoa do app (que vira a administradora)
+        # Sem st.container(key=...) em volta: com a moldura, o Streamlit deixava uma cópia apagada
+        # do campo e do botão por cima da tela inicial depois do st.rerun() (ferramentas/teste_fantasma.py).
         novo = st.text_input("Seu nome" if not pessoas else "Outra pessoa", key="quem_novo",
                              max_chars=MAX_NOME, placeholder="Ex.: Pedro")
         if st.button("Entrar", key="quem_entrar", type="primary", use_container_width=True,
@@ -419,8 +527,115 @@ def _identificado() -> bool:
             if len(novo.strip()) < 2:
                 _erro_campo("Digite o seu nome.")
             else:
-                _entrar_como(novo, pessoas)
+                _prender(aparelho, novo, pessoas)
+    else:
+        adm = _e(administrador(cfg))
+        if livres:
+            _info(f"Seu nome não está na lista? Peça para <b>{adm}</b> liberar o seu acesso.", "cx-nota")
+        else:
+            _info(f"Este aparelho ainda não tem acesso. Peça para <b>{adm}</b> liberar o seu nome "
+                  "em <b>Configurações</b> e abra o app de novo.", "cx-perigo")
+            if st.button("Já liberaram, tentar de novo", key="quem_denovo", icon=":material/refresh:",
+                         use_container_width=True):
+                _config.clear()
+                st.rerun()
     return False
+
+
+# ── Configurações (só o administrador) ────────────────────────────────────────
+
+def _config_varias(pares: dict) -> bool:
+    try:
+        for chave, valor in pares.items():
+            _banco().save_config(chave, valor)
+        _config.clear()
+        return True
+    except Exception as e:
+        _config.clear()
+        st.error(f"Não consegui salvar: {e}")
+        return False
+
+
+def tela_config():
+    _cabecalho("Configurações", voltar_para="inicio", subtitulo="Quem usa o app e em quais aparelhos")
+    if not _sou_admin():
+        st.info("Só o administrador do app abre esta tela.")
+        return
+    cfg = _config()
+    pessoas = pessoas_da_config(cfg)
+    presos = aparelhos_por_pessoa(cfg)
+    adm = administrador(cfg)
+
+    for i, p in enumerate(pessoas):
+        n = len(presos[p])
+        liberado = chave_busca(cfg.get(f"liberado:{p}", "")) == "sim"
+        if liberado:
+            estado = "<span class='sit c-breve'>Liberado para 1 aparelho novo</span>"
+        elif n:
+            estado = f"<span class='sit c-ok'>{n} aparelho{'s' if n > 1 else ''}</span>"
+        else:
+            estado = "<span class='sit c-neutro'>Ainda não entrou</span>"
+        telegram = "Telegram conectado" if cfg.get(f"telegram:{p}") else "Sem Telegram"
+        with st.container(key=f"sec_cf_{i}"):
+            st.markdown(f"<div class='nt-pessoa'><span>{_e(p)}{' · administrador' if p == adm else ''}</span>{estado}</div>"
+                        f"<div class='cf-meta'>{telegram}</div>", unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                if n and not liberado and st.button("Liberar novo aparelho", key=f"cf_lib_{i}",
+                                                    icon=":material/add_to_home_screen:", use_container_width=True):
+                    if _config_varias({f"liberado:{p}": "sim"}):
+                        _flash(f"{p} pode escolher o nome em mais um aparelho")
+                        st.rerun()
+                if liberado and st.button("Cancelar liberação", key=f"cf_canc_{i}", icon=":material/block:",
+                                          use_container_width=True):
+                    if _config_varias({f"liberado:{p}": ""}):
+                        st.rerun()
+            with c2:
+                # O administrador não desliga o próprio aparelho (ficaria sem a tela de Configurações)
+                if n and p != adm and st.button("Desligar aparelhos", key=f"cf_des_{i}",
+                                                icon=":material/phonelink_erase:", use_container_width=True,
+                                                help="Os aparelhos dessa pessoa perdem o acesso; o nome fica livre para ela escolher de novo."):
+                    if _config_varias({f"aparelho:{a}": "" for a in presos[p]}):
+                        _flash(f"Aparelhos de {p} desligados")
+                        st.rerun()
+            if p != adm and st.button(f"Remover {p}", key=f"cf_rem_{i}", type="tertiary", icon=":material/person_remove:"):
+                st.session_state["_cf_remover"] = p
+                st.rerun()
+
+    alvo = st.session_state.get("_cf_remover")
+    if alvo in pessoas and alvo != adm:
+        _info(f"Remover <b>{_e(alvo)}</b>? Os aparelhos e o Telegram dessa pessoa são desligados. "
+              "O que ela já registrou continua com o nome dela.", "cx-perigo")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Não", key="cf_rem_nao", use_container_width=True):
+                st.session_state.pop("_cf_remover", None)
+                st.rerun()
+        with c2:
+            if st.button("Sim, remover", key="cf_rem_sim", use_container_width=True):
+                pares = {"pessoas": ", ".join(x for x in pessoas if x != alvo), f"telegram:{alvo}": "",
+                         f"liberado:{alvo}": ""}
+                pares.update({f"aparelho:{a}": "" for a in presos[alvo]})
+                st.session_state.pop("_cf_remover", None)
+                if _config_varias(pares):
+                    _flash(f"{alvo} removida do app")
+                    st.rerun()
+
+    with st.container(key="sec_cf_nova"):
+        _titulo_secao(len(pessoas) + 1, "Adicionar pessoa")
+        novo = st.text_input("Nome", key="cf_novo", max_chars=MAX_NOME, placeholder="Ex.: Gabi")
+        if st.button("Adicionar", key="cf_add", type="primary", icon=":material/person_add:",
+                     use_container_width=True):
+            nome = " ".join(novo.replace(",", " ").replace(":", " ").split())
+            if len(nome) < 2:
+                _erro_campo("Digite o nome.")
+            elif any(chave_busca(x) == chave_busca(nome) for x in pessoas):
+                _erro_campo("Já existe uma pessoa com esse nome.")
+            elif _config_varias({"pessoas": ", ".join(pessoas + [nome])}):
+                _flash(f"{nome} adicionada. Peça para ela abrir o app e escolher o nome.")
+                st.rerun()
+    _info("Quando a pessoa abre o app pela primeira vez, ela escolhe o nome e aquele aparelho fica preso "
+          "nele. Se trocar de celular, toque em <b>Liberar novo aparelho</b>.", "cx-nota")
 
 
 # ── Nova cobrança: escolher o tipo ────────────────────────────────────────────
@@ -472,14 +687,16 @@ def _bloco_conferencia(total, partes, prefixo: str) -> bool:
     return st.checkbox("Está certo assim, salvar mesmo com a diferença", key=f"{prefixo}aceito_dif")
 
 
-def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parcelas: list, prefixo: str):
+def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parcelas: list, prefixo: str,
+            observacoes: str = ""):
     if st.session_state.get("_salvando"):
         return
     st.session_state["_salvando"] = True
     try:
         cid = _banco().criar_cobranca(
             {"Tipo": tipo, "Cliente": cliente, "Turma": turma, "Treinamento": treino,
-             "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario()},
+             "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
+             "Observações": observacoes.strip()},
             parcelas,
         )
     except Exception as e:
@@ -601,6 +818,8 @@ def tela_pix():
         else:
             st.caption("Preencha os valores e as parcelas para ver o resumo.")
 
+    obs_px = st.text_input("Observação (opcional)", key="px_obs", max_chars=300,
+                           placeholder="Ex.: parte em permuta")
     if st.button("Salvar cobrança", type="primary", key="px_salvar", use_container_width=True,
                  icon=":material/check:"):
         if not confirmado:
@@ -609,7 +828,7 @@ def tela_pix():
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
             _salvar(TIPO_PIX, cliente, turma, treino, total,
-                    parcelas_pix(entrada, data_entrada, valores, datas, hoje), "px_")
+                    parcelas_pix(entrada, data_entrada, valores, datas, hoje), "px_", obs_px)
 
 
 # ── Cobrança cartão ───────────────────────────────────────────────────────────
@@ -639,8 +858,11 @@ def tela_cartao():
     with st.container(key="sec_ct3"):
         _titulo_secao(3, "Datas para passar o cartão")
         st.caption("Para quando o cliente não tem limite para passar tudo de uma vez.")
-        n = st.number_input("Em quantas vezes vai passar?", min_value=1, max_value=MAX_DATAS_CARTAO, value=None,
-                            step=1, key="ct_n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}")
+        n = st.number_input("Quantas vezes você vai passar o cartão?", min_value=1, max_value=MAX_DATAS_CARTAO,
+                            value=None, step=1, key="ct_n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}",
+                            help="Cada vez é um dia em que você passa o cartão do cliente. "
+                                 "Em cada uma você diz o valor e em quantas parcelas ela foi dividida.")
+        vezes = []
         if n:
             n = int(n)
             digitados = []
@@ -655,19 +877,24 @@ def tela_cartao():
                         if not ok_v:
                             erros.append("Tem valor digitado errado.")
                         digitados.append(v)
+                    vezes.append(int(st.number_input(
+                        f"Parcelado em quantas vezes ({k + 1}ª passada)", min_value=1, max_value=MAX_VEZES_CARTAO,
+                        value=1, step=1, key=f"ct_x{k}",
+                        help="Em quantas parcelas essa passada é dividida no cartão. 1 = à vista.")))
             valores = resolver_valores(a_cobrar, digitados)
             if any(d is None for d in datas):
                 erros.append("Falta escolher alguma data.")
             if total and any(v <= 0 for v in valores):
                 erros.append("Tem data com valor zero ou negativo.")
         else:
-            erros.append("Falta dizer em quantas vezes vai passar.")
+            erros.append("Falta dizer quantas vezes vai passar o cartão.")
 
     confirmado = True
     with st.container(key="sec_ct4"):
         _titulo_secao(4, "Resumo")
         if valores and all(datas):
-            linhas = [f"<b>{data_br(d)}</b> · {formatar_brl(v)}" for d, v in sorted(zip(datas, valores))]
+            linhas = [f"<b>{data_br(d)}</b> · {formatar_brl(v)} · {texto_vezes(v, x)}"
+                      for d, v, x in sorted(zip(datas, valores, vezes))]
             _info("<br>".join(linhas) + f"<br>A cobrança vai até <b>{nome_mes(max(datas))}</b>")
             confirmado = _bloco_conferencia(total, [ja_pago] + valores, "ct_")
             _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
@@ -675,6 +902,8 @@ def tela_cartao():
         else:
             st.caption("Escolha as datas para ver o resumo.")
 
+    obs_ct = st.text_input("Observação (opcional)", key="ct_obs", max_chars=300,
+                           placeholder="Ex.: cartão do marido")
     if st.button("Salvar cobrança", type="primary", key="ct_salvar", use_container_width=True,
                  icon=":material/check:"):
         if not confirmado:
@@ -682,9 +911,10 @@ def tela_cartao():
         if erros:
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
-            ordem = sorted(zip(datas, valores))
+            ordem = sorted(zip(datas, valores, vezes))
             _salvar(TIPO_CARTAO, cliente, turma, treino, total,
-                    parcelas_cartao(ja_pago, hoje, [v for _, v in ordem], [d for d, _ in ordem]), "ct_")
+                    parcelas_cartao(ja_pago, hoje, [v for _, v, _ in ordem], [d for d, _, _ in ordem],
+                                    [x for _, _, x in ordem]), "ct_", obs_ct)
 
 
 # ── Relatório ─────────────────────────────────────────────────────────────────
@@ -708,17 +938,21 @@ def _linha_estado(c: dict, hoje: date) -> str:
 
 
 def _html_cliente(c: dict, hoje: date) -> str:
+    """Cartão compacto (3 linhas finas) para caber mais gente na tela; a barrinha de quanto já
+    foi pago fica na borda de baixo."""
     total = c["pago"] + c["falta"]
     pct = int(round(100 * c["pago"] / total)) if total else 0
-    selo = "<div class='cc-selo'>QUITADO</div>" if c["situacao"] == CLI_QUITADO else ""
+    quitado = c["situacao"] == CLI_QUITADO
+    nota = "<span class='cc-nota'>obs</span>" if c["tem_obs"] else ""
+    valor = (f"pago <b>{formatar_brl(c['pago'])}</b>" if quitado
+             else f"falta <b>{formatar_brl(c['falta'])}</b>")
+    estado = "" if quitado else f"<div class='cc-est'>{_linha_estado(c, hoje)}</div>"
     return (
         f"<div class='cc {COR_CLI[c['situacao']]}'>"
-        f"<div class='cc-topo'><span class='cc-turma'>{_e(c['turma'])} · {_e(c['treinamento'])} · "
-        f"{_e(c['tipo'])}</span>{'' if selo else _chip_sit(c['situacao'])}</div>"
-        f"<div class='cc-nome'>{_e(c['cliente'])}</div>"
-        f"<div class='pg'><i style='width:{pct}%'></i></div>"
-        f"<div class='cc-val'>Pago <b>{formatar_brl(c['pago'])}</b> · falta <b>{formatar_brl(c['falta'])}</b></div>"
-        f"<div class='cc-est'>{_linha_estado(c, hoje)}</div>{selo}</div>"
+        f"<div class='cc-l1'><span class='cc-nome'>{_e(c['cliente'])}</span>{nota}{_chip_sit(c['situacao'])}</div>"
+        f"<div class='cc-l2'><span class='cc-turma'>{_e(c['turma'])} · {_e(c['treinamento'])} · {_e(c['tipo'])}</span>"
+        f"<span class='cc-val'>{valor}</span></div>{estado}"
+        f"<i class='cc-pg' style='width:{pct}%'></i></div>"
     )
 
 
@@ -775,7 +1009,7 @@ def tela_relatorio():
     if cobs is None:
         return
 
-    termo = st.text_input("Buscar", key="rf_busca", placeholder="Nome do cliente ou turma (ex.: L345)",
+    termo = st.text_input("Buscar", key="rf_busca", placeholder="Nome, turma ou palavra da observação",
                           label_visibility="collapsed", icon=":material/search:")
 
     with st.expander("Filtros", icon=":material/tune:"):
@@ -785,9 +1019,11 @@ def tela_relatorio():
         turma = st.text_input("Turma", key="rf_turma", placeholder="Ex.: L345")
         if turma.strip() and not normalizar_turma(turma):
             _erro_campo("Turma não reconhecida. Ex.: L345")
+        com_obs = st.pills("Observações", ["Com observação", "Sem observação"], key="rf_obs")
 
     filtradas = filtrar(cobs, termo, [SITUACOES_FILTRO[s] for s in sits or []], tipos or None,
-                        treinos or None, turma)
+                        treinos or None, turma,
+                        obs={"Com observação": "com", "Sem observação": "sem"}.get(com_obs, ""))
     st.markdown(_html_resumo(resumo(filtradas)), unsafe_allow_html=True)
 
     visao = st.segmented_control("Ver", ["Clientes", "Agenda"], key="rf_visao", default="Clientes",
@@ -795,7 +1031,7 @@ def tela_relatorio():
     if visao == "Agenda":
         _visao_agenda(filtradas, hoje)
     else:
-        _visao_clientes(filtradas, hoje, bool(termo or sits or tipos or treinos or turma))
+        _visao_clientes(filtradas, hoje, bool(termo or sits or tipos or treinos or turma or com_obs))
 
     if st.button("Atualizar", key="rf_atualizar", icon=":material/refresh:", type="tertiary"):
         _invalidar()
@@ -877,11 +1113,14 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     if p["paga"] and p["marcado_por"]:
         verbo = "passou" if c["tipo"] == TIPO_CARTAO else "recebeu"
         quem = f"<br><span class='pc-quem'>{_e(p['marcado_por'])} {verbo}</span>"
+    obs = f"<div class='pc-obs'>{_e(p['observacao'])}</div>" if p["observacao"] else ""
+    if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+        quem = f" · {texto_vezes(p['valor'], p['vezes'])}" + quem
     return (
         f"<div class='pc {cor}{' pago' if p['paga'] else ''}'>{bloco}<div class='pc-corpo'>"
         f"<div class='pc-topo'><span class='pc-tag'>{topo}</span>{sit}</div>{nome}"
         f"<div class='pc-rot'>{_e(p['rotulo'])}{quem}</div>"
-        f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div></div>{carimbo}</div>"
+        f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div>{obs}</div>{carimbo}</div>"
     )
 
 
@@ -930,6 +1169,14 @@ def _dlg_receber(cid: str, n: int):
     k = f"_rc_{cid}_{n}"   # chave com o ID: fechar no X não pode vazar campo para outra parcela
     quando = st.date_input("Recebido em" if c["tipo"] == TIPO_PIX else "Passou em", value=_hoje(),
                            format="DD/MM/YYYY", key=f"{k}_data")
+    vezes = p["vezes"]
+    if c["tipo"] == TIPO_CARTAO:
+        vezes = int(st.number_input("Passou em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+                                    value=p["vezes"], step=1, key=f"{k}_vezes"))
+        # HTML, não st.caption: dois "R$" na mesma linha viram fórmula ($...$) no markdown do Streamlit
+        _info(f"{formatar_brl(p['valor'])} · <b>{texto_vezes(p['valor'], vezes)}</b>")
+    obs = st.text_input("Observação (opcional)", value=p["observacao"], key=f"{k}_obs", max_chars=200,
+                        placeholder="Ex.: pago em permuta")
     arquivo = None
     sec = _secrets_drive()
     if sec:
@@ -949,7 +1196,9 @@ def _dlg_receber(cid: str, n: int):
                 return
         try:
             ok = _banco().atualizar_parcela(cid, n, {"Status": STATUS_PAGA, "Pago em": quando,
-                                                    "Comprovante": link, "Marcado por": _usuario()})
+                                                    "Comprovante": link, "Marcado por": _usuario(),
+                                                    "Observação": obs.strip(),
+                                                    **({"Vezes no cartão": vezes} if c["tipo"] == TIPO_CARTAO else {})})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
@@ -977,6 +1226,18 @@ def _dlg_ver(cid: str, n: int):
     if link:
         st.link_button("Abrir comprovante", link, icon=":material/open_in_new:", use_container_width=True)
     k = f"_vp_{cid}_{n}"
+    obs = st.text_input("Observação", value=p["observacao"], key=f"{k}_obs", max_chars=200,
+                        placeholder="Ex.: pago em permuta")
+    if obs.strip() != p["observacao"] and st.button("Salvar observação", key=f"{k}_obs_ok", type="primary",
+                                                    icon=":material/check:", use_container_width=True):
+        try:
+            _banco().atualizar_parcela(cid, n, {"Observação": obs.strip()})
+        except Exception as e:
+            st.error(f"Não consegui salvar: {e}")
+            return
+        _invalidar()
+        _flash("Observação salva")
+        st.rerun()
     if not st.session_state.get(f"{k}_conf"):
         if st.button("Desmarcar pagamento", key=f"{k}_des", type="tertiary", icon=":material/undo:"):
             st.session_state[f"{k}_conf"] = True
@@ -1014,11 +1275,19 @@ def _dlg_alterar(cid: str, n: int):
     nova_data = st.date_input("Data", value=p["vencimento"], format="DD/MM/YYYY", key=f"{k}_data")
     novo_valor, ok_v = _valor("Valor", f"{k}_valor", placeholder=f"{p['valor']:.2f}".replace(".", ","),
                               help="Em branco = continua o mesmo valor.")
+    vezes = p["vezes"]
+    if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+                                    value=p["vezes"], step=1, key=f"{k}_vezes"))
+    obs = st.text_input("Observação (opcional)", value=p["observacao"], key=f"{k}_obs", max_chars=200,
+                        placeholder="Ex.: combinou pagar em permuta")
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
         if not ok_v or not nova_data or (novo_valor is not None and novo_valor <= 0):
             st.error("Confira a data e o valor.")
             return
-        campos = {"Vencimento": nova_data}
+        campos = {"Vencimento": nova_data, "Observação": obs.strip()}
+        if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+            campos["Vezes no cartão"] = vezes
         if novo_valor is not None:
             campos["Valor"] = novo_valor
         try:
@@ -1066,18 +1335,44 @@ def _dlg_adicionar(cid: str):
     data = st.date_input("Data", value=mes_mais(ultima, 1) if c["tipo"] == TIPO_PIX else None,
                          format="DD/MM/YYYY", key=f"{k}_data")
     valor, ok_v = _valor("Valor", f"{k}_valor")
+    vezes = 1
+    if c["tipo"] == TIPO_CARTAO:
+        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+                                    value=1, step=1, key=f"{k}_vezes"))
     if st.button("Adicionar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/add:"):
         if not data or not ok_v or not valor:
             st.error("Preencha a data e o valor.")
             return
         try:
             _banco().adicionar_parcela(cid, {"Nº": proximo_numero(c["parcelas"]), "Vencimento": data,
-                                             "Valor": valor})
+                                             "Valor": valor,
+                                             **({"Vezes no cartão": vezes} if c["tipo"] == TIPO_CARTAO else {})})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
         _invalidar()
         _flash("Adicionado")
+        st.rerun()
+
+
+@st.dialog("Observações")
+def _dlg_obs(cid: str):
+    c = _cobranca(cid)
+    if not c:
+        return
+    st.markdown(f"<div class='dl-cab'><b>{_e(c['cliente'])}</b><span>Anotação só para o registro de vocês "
+                "(ex.: parte paga em permuta).</span></div>", unsafe_allow_html=True)
+    k = f"_ob_{cid}"
+    txt = st.text_area("Observações", value=c["observacoes"], key=f"{k}_txt", height=150, max_chars=1500,
+                       label_visibility="collapsed", placeholder="Escreva aqui…")
+    if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
+        try:
+            _banco().atualizar_cobranca(cid, {"Observações": txt.strip()})
+        except Exception as e:
+            st.error(f"Não consegui salvar: {e}")
+            return
+        _invalidar()
+        _flash("Observação salva")
         st.rerun()
 
 
@@ -1177,8 +1472,13 @@ def tela_cobranca():
         f"</div>{aviso_total}{quem}</div>",
         unsafe_allow_html=True,
     )
-    if c["observacoes"]:
-        _info(_e(c["observacoes"]), "cx-nota")
+    with st.container(key="fc_obs"):
+        if c["observacoes"]:
+            st.markdown("<div class='ob'><span>Observações</span>"
+                        + _e(c["observacoes"]).replace("\n", "<br>") + "</div>", unsafe_allow_html=True)
+        if st.button("Editar observação" if c["observacoes"] else "Anotar observação", key="fc_obs_btn",
+                     icon=":material/edit_note:", use_container_width=True):
+            _dlg_obs(c["id"])
 
     for p in c["parcelas"]:
         _parcela_ui(p, c, hoje, contexto="fc")
@@ -1376,7 +1676,8 @@ def tela_feriados():
 
 # Para onde cada tela volta com a setinha do aparelho ("inicio" sai do app).
 _TELA_PAI = {"nova": "inicio", "pix": "nova", "cartao": "nova", "relatorio": "inicio",
-             "excluidas": "inicio", "notificacoes": "inicio", "feriados": "inicio", "cobranca": None}
+             "excluidas": "inicio", "notificacoes": "inicio", "feriados": "inicio", "config": "inicio",
+             "cobranca": None}
 
 
 def _voltar_do_celular():
@@ -1448,6 +1749,7 @@ telas = {
     "cobranca": tela_cobranca,
     "excluidas": tela_excluidas,
     "notificacoes": tela_notificacoes,
+    "config": tela_config,
     "feriados": tela_feriados,
 }
 if st.session_state.tela not in telas:
@@ -1455,3 +1757,4 @@ if st.session_state.tela not in telas:
 if _identificado():
     telas[st.session_state.tela]()
     _voltar_do_celular()
+    _renovar_cookie_do_aparelho()

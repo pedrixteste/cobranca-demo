@@ -78,7 +78,11 @@ JS = r"""
     medir(cs.color, "digitado");
     if (el.placeholder) medir(getComputedStyle(el, "::placeholder").color, "exemplo");
   });
-  return {total, ruins};
+  // pedaços de uma tela anterior que ficaram na página, apagados (fantasmas)
+  const fantasmas = [...document.querySelectorAll('[data-testid="stElementContainer"], [data-testid="stVerticalBlock"]')]
+    .filter(e => { const r = e.getBoundingClientRect(); return r.width > 2 && r.height > 2 && parseFloat(getComputedStyle(e).opacity) < 0.9; })
+    .map(e => (e.innerText || e.className.toString()).trim().slice(0, 40));
+  return {total, ruins, fantasmas};
 }
 """
 
@@ -89,7 +93,8 @@ erros_tela = []
 def esperar(page, ms=2200):
     page.wait_for_timeout(ms)
     for _ in range(40):
-        if not page.locator("[data-testid=stStatusWidget]").count():
+        # pronto = sem o indicador de "rodando" E sem pedaço da tela anterior ainda esmaecido
+        if not page.locator("[data-testid=stStatusWidget]").count() and not page.locator("[data-stale=true]").count():
             break
         page.wait_for_timeout(250)
     page.wait_for_timeout(500)
@@ -101,8 +106,16 @@ def auditar(page, nome):
     esperar(page, 300)
     page.screenshot(path=str(OUT / f"{nome}.png"), full_page=True)
     r = page.evaluate(JS)
+    if r["ruins"] or r["fantasmas"]:
+        # Pode ser só a tela anterior ainda sumindo (o Streamlit a deixa esmaecida por um instante):
+        # mede de novo depois de assentar e fica só com o que persistir.
+        page.wait_for_timeout(2500)
+        r = page.evaluate(JS)
     resultado[nome] = r
-    print(f"{nome:28s} textos {r['total']:3d} | fracos {len(r['ruins'])}")
+    print(f"{nome:28s} textos {r['total']:3d} | fracos {len(r['ruins'])}" +
+          (f" | FANTASMAS {r['fantasmas'][:3]}" if r["fantasmas"] else ""))
+    if r["fantasmas"]:
+        erros_tela.append(f"fantasma em {nome}: {r['fantasmas'][:3]}")
 
 
 def abrir(page, espera=5000):
@@ -172,7 +185,7 @@ with sync_playwright() as p:
     abrir(page)
     tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_cartao .hm-card")
     campo(page, "Valor total").fill("10000"); campo(page, "Valor que já foi pago").fill("2000")
-    campo(page, "Em quantas vezes vai passar?").fill("20"); campo(page, "Em quantas vezes vai passar?").press("Enter"); esperar(page)
+    campo(page, "Quantas vezes você vai passar o cartão?").fill("20"); campo(page, "Quantas vezes você vai passar o cartão?").press("Enter"); esperar(page)
     print("campos de data no cartão:", page.locator("[data-testid=stDateInput]").count())
     auditar(page, "10_cartao_20_datas")
     botao(page, "Salvar cobrança"); auditar(page, "11_cartao_erros")
@@ -214,6 +227,16 @@ with sync_playwright() as p:
     botao(page, "Feriados"); auditar(page, "30_feriados")
     page.get_by_text(str(__import__("datetime").date.today().year + 1), exact=True).first.click(); esperar(page)
     auditar(page, "31_feriados_ano_que_vem")
+    abrir(page)
+    if page.locator("button:visible", has_text="Configurações").count():
+        botao(page, "Configurações"); auditar(page, "33_configuracoes")
+        abrir(page)
+    tocar(page, ".st-key-hm_rel .hm-card"); tocar(page, "[class*='st-key-cc_'] .cc")
+    botao(page, "observação"); auditar(page, "34_dlg_observacao")
+    page.locator("[role=dialog] textarea").first.fill("parte em permuta"); botao(page, "Salvar", "[role=dialog]")
+    auditar(page, "35_ficha_com_observacao")
+    abrir(page)
+    tocar(page, ".st-key-hm_rel .hm-card"); auditar(page, "36_relatorio_com_obs")
     abrir(page)
     botao(page, "Usando como"); auditar(page, "32_trocar_pessoa")
     b.close()

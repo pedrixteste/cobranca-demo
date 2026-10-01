@@ -199,6 +199,88 @@ class Telegram(unittest.TestCase):
         self.assertIn("A receber: R$ 450,00", notifier.montar_semanal(cobs, HOJE))
 
 
+class PessoasEAparelhos(unittest.TestCase):
+    CFG = {"pessoas": "Pedro, Gabi, Ana", "aparelho:aaaa": "Pedro", "aparelho:bbbb": "Gabi",
+           "aparelho:cccc": "Fulano", "aparelho:dddd": ""}
+
+    def test_admin_e_o_primeiro_ou_o_escolhido(self):
+        self.assertEqual(n.administrador(self.CFG), "Pedro")
+        self.assertEqual(n.administrador({**self.CFG, "admin": "Gabi"}), "Gabi")
+        self.assertEqual(n.administrador({**self.CFG, "admin": "Quem"}), "Pedro")
+        self.assertEqual(n.administrador({}), "")
+
+    def test_aparelho_preso(self):
+        self.assertEqual(n.nome_do_aparelho(self.CFG, "bbbb"), "Gabi")
+        self.assertEqual(n.nome_do_aparelho(self.CFG, "cccc"), "")   # pessoa removida
+        self.assertEqual(n.nome_do_aparelho(self.CFG, "dddd"), "")   # aparelho desligado
+        self.assertEqual(n.nome_do_aparelho(self.CFG, "zzzz"), "")
+        self.assertEqual(n.nome_do_aparelho(self.CFG, ""), "")
+
+    def test_so_nome_sem_aparelho_fica_livre(self):
+        self.assertEqual(n.nomes_livres(self.CFG), ["Ana"])
+
+    def test_liberar_deixa_escolher_de_novo(self):
+        self.assertEqual(n.nomes_livres({**self.CFG, "liberado:Gabi": "sim"}), ["Gabi", "Ana"])
+        self.assertEqual(n.nomes_livres({**self.CFG, "liberado:Gabi": ""}), ["Ana"])
+
+    def test_desligar_aparelho_libera_o_nome(self):
+        self.assertEqual(n.nomes_livres({**self.CFG, "aparelho:bbbb": ""}), ["Gabi", "Ana"])
+
+
+class Observacoes(unittest.TestCase):
+    def setUp(self):
+        self.cobs = n.montar_cobrancas(
+            [{**cob("a1", cliente="Maria"), "Observações": "metade em permuta"},
+             cob("b2", cliente="João", turma="V12"),
+             cob("c3", cliente="Ana", turma="I7")],
+            [parc("a1", 1, "20/10/2026", "100,00"),
+             {**parc("b2", 1, "20/10/2026", "100,00"), "Observação": "pagou com serviço de pintura"},
+             parc("c3", 1, "20/10/2026", "100,00")], HOJE)
+
+    def test_tem_obs_na_cobranca_ou_na_parcela(self):
+        self.assertEqual({c["cliente"]: c["tem_obs"] for c in self.cobs},
+                         {"Maria": True, "João": True, "Ana": False})
+        self.assertEqual(self.cobs[1]["parcelas"][0]["observacao"], "pagou com serviço de pintura")
+
+    def test_filtro_com_e_sem(self):
+        self.assertEqual(sorted(c["cliente"] for c in n.filtrar(self.cobs, obs="com")), ["João", "Maria"])
+        self.assertEqual([c["cliente"] for c in n.filtrar(self.cobs, obs="sem")], ["Ana"])
+        self.assertEqual(len(n.filtrar(self.cobs)), 3)
+
+    def test_busca_acha_palavra_da_observacao(self):
+        self.assertEqual([c["cliente"] for c in n.filtrar(self.cobs, "permuta")], ["Maria"])
+        self.assertEqual([c["cliente"] for c in n.filtrar(self.cobs, "pintura")], ["João"])
+
+
+class CartaoParcelado(unittest.TestCase):
+    def test_vezes_de_cada_passada(self):
+        linhas = n.parcelas_cartao(0, HOJE, [8000.0, 4000.0], [date(2026, 10, 5), date(2027, 6, 5)], [8, 4])
+        self.assertEqual([l["Vezes no cartão"] for l in linhas], [8, 4])
+        self.assertEqual([l["Nº"] for l in linhas], [1, 2])
+
+    def test_sem_vezes_e_a_vista(self):
+        linhas = n.parcelas_cartao(1000, HOJE, [500.0], [date(2026, 10, 5)])
+        self.assertEqual(linhas[1]["Vezes no cartão"], 1)
+        self.assertNotIn("Vezes no cartão", linhas[0])      # o "já pago" não tem parcelamento
+
+    def test_texto(self):
+        self.assertEqual(n.texto_vezes(8000, 8), "8x de R$ 1.000,00")
+        self.assertEqual(n.texto_vezes(8000, 1), "à vista")
+        self.assertEqual(n.texto_vezes(1000, 3), "3x de R$ 333,33")
+
+    def test_leitura_da_planilha(self):
+        c = n.montar_cobrancas([cob(tipo="Cartão")],
+                               [{**parc("a1", 1, "05/10/2026", "8000,00"), "Vezes no cartão": "8"},
+                                {**parc("a1", 2, "05/06/2027", "4000,00"), "Vezes no cartão": ""},
+                                {**parc("a1", 3, "05/07/2027", "100,00"), "Vezes no cartão": "abc"}], HOJE)[0]
+        self.assertEqual([p["vezes"] for p in c["parcelas"]], [8, 1, 1])
+
+    def test_aviso_do_telegram_diz_em_quantas_vezes(self):
+        cobs = n.montar_cobrancas([cob(tipo="Cartão")],
+                                  [{**parc("a1", 1, "30/09/2026", "8000,00"), "Vezes no cartão": "8"}], HOJE)
+        self.assertIn("passar cartão em 8x", notifier.montar_diario(cobs, HOJE))
+
+
 class Notificacoes(unittest.TestCase):
     CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
            "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}

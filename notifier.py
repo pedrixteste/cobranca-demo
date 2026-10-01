@@ -80,7 +80,9 @@ def _linha(p: dict, c: dict, hoje: date) -> str:
     atraso = (hoje - d).days
     if atraso > 0:
         quando += f" ({atraso} dia{'s' if atraso > 1 else ''} de atraso)"
-    forma = "💳 passar cartão" if c["tipo"] == nucleo.TIPO_CARTAO else "Pix"
+    forma = "Pix"
+    if c["tipo"] == nucleo.TIPO_CARTAO:
+        forma = "💳 passar cartão" + (f" em {p['vezes']}x" if p.get("vezes", 1) > 1 else "")
     return (f"• <b>{_esc(c['cliente'])}</b> ({_esc(c['turma'])}) · {nucleo.formatar_brl(p['valor'])}"
             f" · {_esc(p['rotulo'].lower())} · {forma} · {quando}")
 

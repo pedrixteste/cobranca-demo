@@ -15,7 +15,8 @@ falhas = []
 def esperar(page, ms=2200):
     page.wait_for_timeout(ms)
     for _ in range(40):
-        if not page.locator("[data-testid=stStatusWidget]").count():
+        # pronto = sem o indicador de "rodando" E sem pedaço da tela anterior ainda esmaecido
+        if not page.locator("[data-testid=stStatusWidget]").count() and not page.locator("[data-stale=true]").count():
             break
         page.wait_for_timeout(250)
     page.wait_for_timeout(500)
@@ -56,7 +57,7 @@ with sync_playwright() as p:
     nome_campo = page.locator("input[aria-label='Seu nome'], input[aria-label='Outra pessoa']").first
     nome_campo.fill("  pedro  teste "); botao(page, "Entrar")
     confere("entrou e mostra o nome na tela inicial", page.get_by_text("Usando como pedro teste").count() == 1)
-    confere("endereço guardou o nome", "quem=pedro" in page.url, page.url)
+    confere("endereço guardou o código do aparelho", "a=" in page.url, page.url[:40])
 
     tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_pix .hm-card")
     campo(page, "Nome do cliente").fill("Cliente Do Registro")

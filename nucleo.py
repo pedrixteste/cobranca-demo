@@ -52,7 +52,7 @@ SITUACAO_EXCLUIDA = "Excluída"
 COBRANCAS_HEADERS = ["ID", "Tipo", "Cliente", "Turma", "Treinamento", "Valor Total",
                      "Criada em", "Criada por", "Situação", "Excluída em", "Observações"]
 PARCELAS_HEADERS = ["ID Cobrança", "Nº", "Vencimento", "Valor", "Status", "Pago em",
-                    "Comprovante", "Marcado por", "Registrado em"]
+                    "Comprovante", "Marcado por", "Registrado em", "Observação", "Vezes no cartão"]
 
 MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
          "agosto", "setembro", "outubro", "novembro", "dezembro"]
@@ -236,16 +236,31 @@ def parcelas_pix(entrada: float, data_entrada: date | None, valores: list[float]
     return linhas
 
 
+MAX_VEZES_CARTAO = 24
+
+
 def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
-                    datas: list[date]) -> list[dict]:
-    """Linhas de uma cobrança no cartão: o já pago (Nº 0) + cada data de passar."""
+                    datas: list[date], vezes: list[int] | None = None) -> list[dict]:
+    """
+    Linhas de uma cobrança no cartão: o já pago (Nº 0) + cada data de passar.
+    `vezes[k]` = em quantas parcelas aquela passada foi (ou vai ser) dividida NO
+    CARTÃO (R$ 8.000 em 8x). É só registro: quem recebe parcelado é a maquininha,
+    para a cobrança o que importa é a data de passar e o valor cheio.
+    """
+    vezes = vezes or [1] * len(valores)
     linhas = []
     if ja_pago and ja_pago > 0:
         linhas.append({"Nº": 0, "Vencimento": hoje, "Valor": ja_pago,
                        "Status": STATUS_PAGA, "Pago em": hoje})
-    for k, (v, d) in enumerate(zip(valores, datas), start=1):
-        linhas.append({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None})
+    for k, (v, d, x) in enumerate(zip(valores, datas, vezes), start=1):
+        linhas.append({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None,
+                       "Vezes no cartão": max(int(x or 1), 1)})
     return linhas
+
+
+def texto_vezes(valor: float, vezes: int) -> str:
+    """'8x de R$ 1.000,00' ou 'à vista'."""
+    return "à vista" if vezes <= 1 else f"{vezes}x de {formatar_brl(valor / vezes)}"
 
 
 def resolver_valores(restante: float, digitados: list) -> list[float]:
@@ -292,6 +307,13 @@ def rotulo_parcela(tipo: str, n: int, total: int) -> str:
     return f"Parcela {n} de {total}"
 
 
+def _vezes(v) -> int:
+    try:
+        return min(max(int(float(_txt(v) or 1)), 1), MAX_VEZES_CARTAO)
+    except ValueError:
+        return 1
+
+
 def _parcela(linha: dict, tipo: str) -> dict:
     try:
         n = int(float(_txt(linha.get("Nº")) or 0))
@@ -305,6 +327,8 @@ def _parcela(linha: dict, tipo: str) -> dict:
         "pago_em": parse_data(linha.get("Pago em")),
         "comprovante": _txt(linha.get("Comprovante")),
         "marcado_por": _txt(linha.get("Marcado por")),
+        "observacao": _txt(linha.get("Observação")),
+        "vezes": _vezes(linha.get("Vezes no cartão")),
         "tipo": tipo,
     }
 
@@ -369,6 +393,8 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "criada_em": parse_data(c.get("Criada em")),
             "criada_por": _txt(c.get("Criada por")),
             "observacoes": _txt(c.get("Observações")),
+            # tem anotação na cobrança OU em alguma parcela (ex.: "pago em permuta")
+            "tem_obs": bool(_txt(c.get("Observações")) or any(p["observacao"] for p in ps)),
             "excluida": excluida,
             "excluida_em": parse_data(c.get("Excluída em")),
             "parcelas": ps,
@@ -406,12 +432,14 @@ def casa_busca(c: dict, termo: str) -> bool:
     turma_buscada = normalizar_turma(termo)
     if turma_buscada and turma_buscada == c["turma"]:
         return True
-    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']}")
+    notas = " ".join([c.get("observacoes", "")] + [p.get("observacao", "") for p in c.get("parcelas", [])])
+    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {notas}")
     return all(palavra in alvo for palavra in chave_busca(termo).split())
 
 
 def filtrar(cobs: list[dict], termo: str = "", situacoes=None, tipos=None,
-            treinamentos=None, turma: str = "") -> list[dict]:
+            treinamentos=None, turma: str = "", obs: str = "") -> list[dict]:
+    """`obs`: "com" = só cobranças com observação; "sem" = só as sem; vazio = todas."""
     turma_n = normalizar_turma(turma) if _txt(turma) else None
     saida = []
     for c in cobs:
@@ -424,6 +452,10 @@ def filtrar(cobs: list[dict], termo: str = "", situacoes=None, tipos=None,
         if treinamentos and c["treinamento"] not in treinamentos:
             continue
         if _txt(turma) and c["turma"] != (turma_n or _txt(turma).upper()):
+            continue
+        if obs == "com" and not c["tem_obs"]:
+            continue
+        if obs == "sem" and c["tem_obs"]:
             continue
         saida.append(c)
     return saida
@@ -457,6 +489,47 @@ def resumo(cobs: list[dict]) -> dict:
         "n_atrasados": sum(1 for c in cobs if c["situacao"] == CLI_ATRASADO),
         "n_cobrancas": len(cobs),
     }
+
+
+# ── Pessoas e aparelhos (aba _Config) ─────────────────────────────────────────
+# O Streamlit Cloud não informa o e-mail de quem está logado, então a trava é
+# por APARELHO: a primeira escolha de nome prende aquele aparelho naquele nome.
+#   pessoas            "Pedro, Gabi, Ana" (o primeiro é quem administra, salvo `admin`)
+#   admin              nome de quem tem a tela Configurações
+#   aparelho:<id>      nome preso àquele aparelho
+#   liberado:<nome>    "sim" = pode ser escolhido em MAIS UM aparelho (gasta ao escolher)
+# Nome com aparelho preso não aparece para outro aparelho escolher: quem troca
+# de celular pede para o administrador liberar.
+
+def pessoas_da_config(config: dict) -> list[str]:
+    return [p.strip() for p in _txt(config.get("pessoas")).split(",") if p.strip()]
+
+
+def administrador(config: dict) -> str:
+    pessoas = pessoas_da_config(config)
+    adm = _txt(config.get("admin"))
+    return adm if adm in pessoas else (pessoas[0] if pessoas else "")
+
+
+def aparelhos_por_pessoa(config: dict) -> dict[str, list[str]]:
+    pessoas = pessoas_da_config(config)
+    saida = {p: [] for p in pessoas}
+    for chave, valor in config.items():
+        if chave.startswith("aparelho:") and _txt(valor) in saida:
+            saida[_txt(valor)].append(chave[len("aparelho:"):])
+    return saida
+
+
+def nome_do_aparelho(config: dict, aparelho: str) -> str:
+    nome = _txt(config.get(f"aparelho:{aparelho}")) if aparelho else ""
+    return nome if nome in pessoas_da_config(config) else ""
+
+
+def nomes_livres(config: dict) -> list[str]:
+    """Nomes que um aparelho novo pode escolher: sem aparelho preso, ou liberados pelo administrador."""
+    presos = aparelhos_por_pessoa(config)
+    return [p for p in pessoas_da_config(config)
+            if not presos[p] or chave_busca(config.get(f"liberado:{p}", "")) == "sim"]
 
 
 # ── Preferências de notificação (aba _Config, iguais para todo mundo) ─────────
