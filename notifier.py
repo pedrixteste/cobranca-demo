@@ -40,6 +40,11 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 DIAS_SEMANA = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"]
 
 
+def _limpo(valor: str) -> str:
+    """Tira espaços e o BOM (marca invisível que o PowerShell põe no começo ao gravar um secret)."""
+    return (valor or "").replace("\ufeff", "").strip()
+
+
 def hoje_sp() -> date:
     return datetime.now(tz=TIMEZONE).date()
 
@@ -48,7 +53,7 @@ def ler_planilha(spreadsheet_id: str) -> dict:
     import gspread
     from google.oauth2.service_account import Credentials
 
-    raw = os.environ.get("GCP_SERVICE_ACCOUNT", "").strip()
+    raw = _limpo(os.environ.get("GCP_SERVICE_ACCOUNT", ""))
     if not raw:
         with open("credentials.json", encoding="utf-8") as f:
             raw = f.read()
@@ -172,7 +177,7 @@ def enviar(bot_token: str, chat_id: str, texto: str) -> bool:
 
 
 def main() -> int:
-    sid = os.environ.get("SPREADSHEET_ID", "").strip()
+    sid = _limpo(os.environ.get("SPREADSHEET_ID", ""))
     if not sid:
         print("SPREADSHEET_ID não configurado.")
         return 1
@@ -210,7 +215,7 @@ def main() -> int:
             print(f"\n──── parte {n} ({len(parte)} caracteres) ────\n{parte}")
         return 0
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    token = _limpo(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     chats = [chat for _, chat in nucleo.destinatarios(dados["config"])]
     chats += [c.strip() for c in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if c.strip()]
     chats = list(dict.fromkeys(chats))   # sem repetir, mantendo a ordem
