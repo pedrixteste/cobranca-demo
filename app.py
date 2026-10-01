@@ -431,37 +431,55 @@ def _codigo_limpo(v) -> str:
 
 
 def _aparelho() -> str:
-    """Código deste aparelho: o do endereço, senão o do cookie. '' se ainda não tem nenhum."""
+    """Código deste aparelho: o do endereço (`?a=`), que o navegador coloca sozinho a partir do
+    que tem guardado; o cookie só é lido direto onde a hospedagem o repassa (no PC, sim; no
+    Streamlit Cloud, não). '' se ainda não tem nenhum."""
     do_endereco = _codigo_limpo(st.query_params.get("a", ""))
     try:
         do_cookie = _codigo_limpo(st.context.cookies.get(COOKIE_APARELHO, ""))
     except Exception:
+        do_cookie = ""
+    if os.environ.get("COBRANCA_SEM_COOKIE"):   # só para teste: imita o Streamlit Cloud no PC
         do_cookie = ""
     return do_endereco or do_cookie
 
 
 def _script_aparelho(codigo: str = ""):
     """
-    Grava (ou renova) o cookie do aparelho. Sem `codigo`, cria um novo e recarrega
-    a página uma vez, para o Python enxergar o cookie. Se o navegador bloquear
-    cookies, troca o texto de espera por um aviso.
+    O código do aparelho mora no NAVEGADOR (cookie + localStorage), mas o Streamlit Cloud não
+    repassa cookies para o app (testado em 01/10/2026: o cookie é gravado e o Python não o vê).
+    Então é o navegador que entrega o código, colocando `?a=<código>` no endereço:
+      - sem `codigo` (o Python ainda não sabe): lê ou cria o código, grava e recarrega a página
+        já com `?a=`; se depois de 3 tentativas não der, troca o texto de espera por um aviso;
+      - com `codigo`: só regrava (renova a validade; o iPhone apaga depois de 7 dias sem uso).
     """
     _iframe_invisivel("""
 <script>
-const P = window.parent, FIXO = "%s";
-const ler = () => { const m = P.document.cookie.match(/(?:^|; )cob_dev=([a-f0-9]+)/); return m ? m[1] : ""; };
-const gravar = id => { P.document.cookie = "cob_dev=" + id + "; path=/; max-age=63072000; SameSite=Lax" +
-                                           (P.location.protocol === "https:" ? "; Secure" : ""); };
+const P = window.parent, FIXO = "%s", CHAVE = "cob_dev", CONTA = "cob_dev_recarga";
+const ler = () => { const m = P.document.cookie.match(/(?:^|; )cob_dev=([a-f0-9]+)/);
+                    let v = m ? m[1] : ""; try { v = v || P.localStorage.getItem(CHAVE) || ""; } catch (e) {} return v; };
+const gravar = id => { P.document.cookie = CHAVE + "=" + id + "; path=/; max-age=34560000; SameSite=Lax" +
+                                           (P.location.protocol === "https:" ? "; Secure" : "");
+                       try { P.localStorage.setItem(CHAVE, id); } catch (e) {} };
 let id = FIXO || ler();
-const novo = !id;
-if (novo) { const a = new Uint8Array(12); crypto.getRandomValues(a);
-            id = Array.from(a, b => b.toString(16).padStart(2, "0")).join(""); }
-gravar(id);   // também renova a validade a cada visita
-if (novo) {
-  const n = parseInt(P.sessionStorage.getItem("cob_dev_recarga") || "0");
-  if (ler() && n < 2) { P.sessionStorage.setItem("cob_dev_recarga", n + 1); P.location.reload(); }
-  else { const e = P.document.querySelector(".dev-espera");
-         if (e) e.textContent = "Este navegador está bloqueando cookies. Libere os cookies deste site ou abra em outro navegador."; }
+if (!id) { const a = new Uint8Array(12); crypto.getRandomValues(a);
+           id = Array.from(a, b => b.toString(16).padStart(2, "0")).join(""); }
+gravar(id);
+if (FIXO) { try { P.sessionStorage.removeItem(CONTA); } catch (e) {} }
+else {
+  let n = 0; try { n = parseInt(P.sessionStorage.getItem(CONTA) || "0"); } catch (e) {}
+  if (n < 3) {
+    try { P.sessionStorage.setItem(CONTA, n + 1); } catch (e) {}
+    const u = new URL(P.location.href); u.searchParams.set("a", id);
+    // Este iframe é "sandbox" e não pode trocar o endereço da página de fora. Mas pode injetar
+    // um script NELA (como a seta de voltar faz), e esse script, sim, pode.
+    const s = P.document.createElement("script");
+    s.textContent = "location.replace(" + JSON.stringify(u.toString()) + ");";
+    P.document.head.appendChild(s);
+  } else {
+    const e = P.document.querySelector(".dev-espera");
+    if (e) e.textContent = "Não consegui preparar este aparelho. Feche e abra o app de novo; se continuar, avise o Pedro.";
+  }
 }
 </script>
 """ % codigo)
