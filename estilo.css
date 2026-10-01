@@ -1,28 +1,36 @@
 /* ── Visual do app de cobranças ────────────────────────────────────────────────
-   Mesma família do app de contas (boleto-tracker), mas com a cor principal
-   ROXA (o boleto é verde), para ninguém confundir os dois no celular.
+   Mesma família do app de contas (boleto-tracker), mas em MODO NOTURNO com
+   destaque em AMARELO FRACO, para ninguém confundir os dois no celular.
+   REGRA DO MODO NOTURNO: nenhuma cor de texto ou de fundo fica escrita solta
+   lá embaixo; tudo sai das variáveis do :root. Texto escuro só existe em cima
+   de fundo claro (o amarelo da marca e o laranja do "em breve").
    Conceito: cada parcela é uma folha de CARNÊ (bloco da data à esquerda) e a
    paga leva um carimbo PAGO / PASSOU.
    Cores de situação (iguais em parcela, cliente e resumo):
      verde  = pago / em dia     cinza   = em aberto, ainda não venceu
-     amarelo = vence em breve   vermelho = atrasado */
+     laranja = vence em breve   vermelho = atrasado
+   (o "em breve" é laranja para não se confundir com o amarelo da marca) */
 
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600;700&display=swap');
 
 :root {
-    --tinta:   #1B2A3A;
-    --apoio:   #5E6B75;
-    --papel:   #F3F1F7;
-    --cartao:  #FFFFFF;
-    --linha:   #DDD8E6;
-    --marca:   #553098;   /* roxo */
-    --marca-2: #3B1F6E;   /* roxo escuro, para texto */
-    --marca-bg: #ECE5F6;  /* roxo bem claro, para fundos */
-    --sobre-marca: #FFFFFF; /* texto em cima do roxo */
-    --ok:      #1E8A5A;  --ok-bg:     #DFF1E7;  --ok-leve:     #F1FAF5;
-    --atraso:  #C4432B;  --atraso-bg: #F7E3DF;  --atraso-leve: #FDF3F0;
-    --breve:   #9A6512;  --breve-bg:  #FBEFD9;  --breve-leve:  #FFF9EE;  --breve-cor: #D69A2D;
-    --neutro:  #5E6B75;  --neutro-bg: #E9EDF1;
+    --tinta:   #F2F1EC;   /* texto principal (claro) */
+    --apoio:   #A4A9B4;   /* texto secundário */
+    --papel:   #14161B;   /* fundo da página */
+    --cartao:  #1E2128;   /* fundo dos cartões */
+    --linha:   #333842;   /* bordas */
+    --marca:   #F2DD82;   /* amarelo fraco */
+    --marca-2: #F2DD82;   /* texto de destaque em cima do escuro */
+    --marca-borda: #CDB95E;
+    --marca-bg: #2F2B18;  /* fundo escuro com um toque de amarelo */
+    --sobre-marca: #1B1806; /* texto em cima do amarelo */
+    /* cada situação: cor do texto/borda, versão "forte" (fundo com letra branca),
+       fundo do chip, fundo leve do cartão e texto de aviso */
+    --ok:      #52C792;  --ok-forte:     #177A4E;  --ok-bg:     #17382A;  --ok-leve:     #162620;  --ok-texto:     #9BE3BF;
+    --atraso:  #F2715B;  --atraso-forte: #C4432B;  --atraso-bg: #4A211A;  --atraso-leve: #2B1916;  --atraso-texto: #FFB7AA;
+    --breve:   #F5A55A;  --breve-bg:  #472C12;  --breve-leve:  #2A1F14;  --breve-cor: #E8862A;  --sobre-breve: #1B1206;
+    --neutro:  #A4A9B4;  --neutro-bg: #2B2F38;
+    --selo-fundo: rgba(20,22,27,.82);   /* atrás dos carimbos PAGO / QUITADO */
     --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
     --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --mono:    'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -38,7 +46,7 @@ header[data-testid="stHeader"] { display: none; }
 .stButton button p { font-weight: 600; }
 /* Botão principal na cor da marca */
 [data-testid="stBaseButton-primary"] { background: var(--marca) !important;
-    border-color: var(--marca-2) !important; color: var(--sobre-marca) !important; }
+    border-color: var(--marca-borda) !important; color: var(--sobre-marca) !important; }
 [data-testid="stBaseButton-primary"] p, [data-testid="stBaseButton-primary"] span { color: var(--sobre-marca) !important; }
 [data-testid="stBaseButton-primary"]:active { filter: brightness(.94); }
 
@@ -57,7 +65,7 @@ header[data-testid="stHeader"] { display: none; }
     * { transition: none !important; animation: none !important; }
 }
 
-.demo-faixa { background: #FBEFD9; color: #6B4A12; border: 1px dashed #D69A2D; border-radius: 12px;
+.demo-faixa { background: var(--marca-bg); color: var(--marca-2); border: 1px dashed var(--marca-borda); border-radius: 12px;
               padding: 8px 12px; font-size: .84rem; margin-bottom: .4rem; }
 .st-key-btn_demo_reset button { color: var(--apoio); }
 
@@ -70,9 +78,10 @@ header[data-testid="stHeader"] { display: none; }
 .cx-info, .cx-ok, .cx-perigo, .cx-nota { border-radius: 12px; padding: 10px 12px; font-size: .9rem;
                                           margin: 4px 0 6px; line-height: 1.45; }
 .cx-info   { background: var(--marca-bg); color: var(--marca-2); }
-.cx-ok     { background: var(--ok-bg); color: #145E3D; }
-.cx-perigo { background: var(--atraso-bg); color: #8E2A18; }
+.cx-ok     { background: var(--ok-bg); color: var(--ok-texto); }
+.cx-perigo { background: var(--atraso-bg); color: var(--atraso-texto); }
 .cx-nota   { background: transparent; border: 1px dashed var(--linha); color: var(--apoio); font-size: .84rem; }
+.cx-erro   { color: var(--atraso-texto); font-size: .84rem; margin: -.55rem 0 .2rem; line-height: 1.35; }
 .cx-divisa { border-top: 1px solid var(--linha); margin: 10px 0 2px; }
 .cx-vazio  { text-align: center; color: var(--apoio); padding: 28px 12px; font-size: .95rem; }
 
@@ -105,18 +114,19 @@ header[data-testid="stHeader"] { display: none; }
 .hm-card  { display: flex; gap: 14px; align-items: center; border-radius: 22px;
             padding: 18px 16px; min-height: 110px; transition: transform .12s ease; }
 .hm-card.claro  { background: var(--cartao); border: 1px solid var(--linha); color: var(--tinta); }
-.hm-card.escuro { background: linear-gradient(135deg, #6A42B0 0%, #553098 55%, #452583 100%); color: var(--sobre-marca); }
+/* "escuro" é só o nome antigo da classe: hoje é o cartão de destaque, AMARELO com letra escura */
+.hm-card.escuro { background: linear-gradient(135deg, #F8EBAE 0%, #F2DD82 55%, #E6CC62 100%); color: var(--sobre-marca); }
 .hm-ico   { width: 50px; height: 50px; border-radius: 15px; display: grid; place-items: center; flex: none; }
 .hm-ico svg { width: 26px; height: 26px; }
 .claro  .hm-ico { background: var(--marca-bg); color: var(--marca); }
-.escuro .hm-ico { background: rgba(255,255,255,.15); color: var(--sobre-marca); }
+.escuro .hm-ico { background: rgba(0,0,0,.10); color: var(--sobre-marca); }
 .hm-txt   { flex: 1; min-width: 0; }
 .hm-tit   { font-family: var(--display); font-weight: 800; font-size: 1.25rem; letter-spacing: -.01em; line-height: 1.1; }
 .hm-desc  { font-size: .9rem; opacity: .75; margin-top: 3px; }
 .hm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .hm-chip  { font-size: .78rem; font-weight: 600; padding: 4px 10px; border-radius: 99px;
-            background: rgba(255,255,255,.17); color: var(--sobre-marca); }
-.hm-chip.atraso { background: #F6D3CC; color: #8E2A18; }
+            background: rgba(0,0,0,.11); color: var(--sobre-marca); }
+.hm-chip.atraso { background: var(--atraso-forte); color: #fff; }
 .hm-seta  { flex: none; opacity: .45; }
 .hm-seta svg { width: 22px; height: 22px; }
 .st-key-btn_excluidas button { color: var(--apoio); }
@@ -138,7 +148,7 @@ header[data-testid="stHeader"] { display: none; }
 
 .sit { font-size: .72rem; font-weight: 700; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
 .sit.c-ok     { background: var(--ok-bg);     color: var(--ok); }
-.sit.c-atraso { background: var(--atraso);    color: #fff; }
+.sit.c-atraso { background: var(--atraso-forte); color: #fff; }
 .sit.c-breve  { background: var(--breve-bg);  color: var(--breve); }
 .sit.c-neutro { background: var(--neutro-bg); color: var(--neutro); }
 
@@ -183,11 +193,11 @@ header[data-testid="stHeader"] { display: none; }
 .cc-val   { font-size: .84rem; color: var(--apoio); }
 .cc-val b { font-family: var(--mono); font-weight: 600; color: var(--tinta); }
 .cc-est   { font-size: .86rem; color: var(--tinta); margin-top: 2px; }
-.cc.c-atraso .cc-est { color: #8E2A18; }
+.cc.c-atraso .cc-est { color: var(--atraso-texto); }
 .cc-selo  { position: absolute; right: 12px; top: 10px; transform: rotate(-7deg);
             border: 2.5px solid var(--ok); color: var(--ok); border-radius: 8px; padding: 1px 8px;
             font-family: var(--mono); font-weight: 700; font-size: .8rem; letter-spacing: .14em;
-            background: rgba(255,255,255,.85); }
+            background: var(--selo-fundo); }
 
 /* ── Folha de carnê (parcela) ────────────────────────────────────────────── */
 
@@ -205,9 +215,9 @@ header[data-testid="stHeader"] { display: none; }
 .pc-mes   { font-size: .64rem; font-weight: 700; letter-spacing: .1em; }
 .pc-dia   { font-family: var(--display); font-weight: 800; font-size: 1.5rem; line-height: 1; margin: 2px 0 1px; }
 .pc-sem   { font-size: .64rem; font-weight: 600; }
-.pc.c-ok .pc-data     { background: var(--ok); color: #fff; }
-.pc.c-atraso .pc-data { background: var(--atraso); color: #fff; }
-.pc.c-breve .pc-data  { background: var(--breve-cor); color: #fff; }
+.pc.c-ok .pc-data     { background: var(--ok-forte); color: #fff; }
+.pc.c-atraso .pc-data { background: var(--atraso-forte); color: #fff; }
+.pc.c-breve .pc-data  { background: var(--breve-cor); color: var(--sobre-breve); }
 
 .pc-corpo { flex: 1; min-width: 0; }
 .pc-topo  { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -222,7 +232,7 @@ header[data-testid="stHeader"] { display: none; }
 .pc-carimbo { position: absolute; right: 0; bottom: -2px; transform: rotate(-9deg);
               border: 2.5px solid var(--ok); color: var(--ok); border-radius: 8px;
               padding: 1px 8px 3px; font-family: var(--mono); font-weight: 700; font-size: .95rem;
-              letter-spacing: .14em; text-align: center; line-height: 1.1; background: rgba(255,255,255,.85); }
+              letter-spacing: .14em; text-align: center; line-height: 1.1; background: var(--selo-fundo); }
 .pc-carimbo small { display: block; font-size: .6rem; letter-spacing: .04em; font-weight: 600; }
 
 [class*="st-key-pc_"] .stButton button { min-height: 2.5rem; padding: 0 .3rem; }

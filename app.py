@@ -40,6 +40,8 @@ SVG_CARTAO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke
 SVG_SETA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
             'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>')
 
+MAX_DATAS_CARTAO = 20   # em quantas vezes dá para dividir a passada no cartão
+
 ICONE_TIPO = {TIPO_PIX: ":material/qr_code_2:", TIPO_CARTAO: ":material/credit_card:"}
 # Classe de cor de cada situação (mesma paleta na parcela e na cobrança)
 COR_CLI = {CLI_ATRASADO: "c-atraso", CLI_EM_BREVE: "c-breve", CLI_EM_DIA: "c-ok",
@@ -230,6 +232,12 @@ def _info(html_txt: str, classe: str = "cx-info"):
     st.markdown(f"<div class='{classe}'>{html_txt}</div>", unsafe_allow_html=True)
 
 
+def _erro_campo(texto: str):
+    """Aviso de erro embaixo de um campo. Não usa st.caption(":red[...]"): a legenda do
+    Streamlit é meio transparente e, no modo noturno, o vermelho ficava apagado."""
+    st.markdown(f"<div class='cx-erro'>{_e(texto)}</div>", unsafe_allow_html=True)
+
+
 def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
     """
     Campo de valor em reais. Devolve (valor, ok): valor None = em branco;
@@ -240,7 +248,7 @@ def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
         return None, True
     v = valor_para_float(txt)
     if v is None or v < 0:
-        st.caption(":red[Valor inválido. Ex.: 1500 ou 1.500,50]")
+        _erro_campo("Valor inválido. Ex.: 1500 ou 1.500,50")
         return None, False
     return v, True
 
@@ -327,7 +335,7 @@ def tela_nova():
         _limpar_campos("px_")
         _ir("pix")
     if _cartao_inicio("hm_cartao", "tq_cartao", "Cobrança cartão", "claro", SVG_CARTAO,
-                      "Cobrança cartão", "Até 10 datas para passar o cartão"):
+                      "Cobrança cartão", f"Até {MAX_DATAS_CARTAO} datas para passar o cartão"):
         _limpar_campos("ct_")
         _ir("cartao")
 
@@ -344,7 +352,7 @@ def _bloco_cliente(prefixo: str):
     if turma:
         _info(f"Turma <b>{turma}</b> · {treino}")
     elif turma_txt.strip():
-        st.caption(":red[Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345]")
+        _erro_campo("Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345")
     erros = []
     if not cliente:
         erros.append("Falta o nome do cliente.")
@@ -534,8 +542,8 @@ def tela_cartao():
     with st.container(key="sec_ct3"):
         _titulo_secao(3, "Datas para passar o cartão")
         st.caption("Para quando o cliente não tem limite para passar tudo de uma vez.")
-        n = st.number_input("Em quantas vezes vai passar?", min_value=1, max_value=10, value=None,
-                            step=1, key="ct_n", placeholder="De 1 a 10")
+        n = st.number_input("Em quantas vezes vai passar?", min_value=1, max_value=MAX_DATAS_CARTAO, value=None,
+                            step=1, key="ct_n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}")
         if n:
             n = int(n)
             digitados = []
@@ -679,7 +687,7 @@ def tela_relatorio():
         treinos = st.pills("Treinamento", list(TREINAMENTOS.values()), selection_mode="multi", key="rf_trein")
         turma = st.text_input("Turma", key="rf_turma", placeholder="Ex.: L345")
         if turma.strip() and not normalizar_turma(turma):
-            st.caption(":red[Turma não reconhecida. Ex.: L345]")
+            _erro_campo("Turma não reconhecida. Ex.: L345")
 
     filtradas = filtrar(cobs, termo, [SITUACOES_FILTRO[s] for s in sits or []], tipos or None,
                         treinos or None, turma)
@@ -984,7 +992,7 @@ def _dlg_editar(cid: str):
     if turma:
         _info(f"Turma <b>{turma}</b> · {TREINAMENTOS[turma[0]]}")
     else:
-        st.caption(":red[Turma não reconhecida. Ex.: L345]")
+        _erro_campo("Turma não reconhecida. Ex.: L345")
     total, ok_t = _valor("Valor total", f"{k}_total",
                          placeholder=f"{(c['valor_total'] or 0):.2f}".replace(".", ","),
                          help="Em branco = continua o mesmo.")
