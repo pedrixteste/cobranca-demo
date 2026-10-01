@@ -41,6 +41,11 @@ header[data-testid="stHeader"] { display: none; }
     [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
     [data-testid="stHorizontalBlock"] > [data-testid="column"] { min-width: 0 !important; }
 }
+/* Iframe do script da seta de voltar: não ocupa espaço na tela */
+.stIFrame, [data-testid="stIFrame"], .stCustomComponentV1 { height: 0 !important; min-height: 0 !important;
+    overflow: hidden; }
+.element-container:has(> .stIFrame), .element-container:has(> [data-testid="stIFrame"]) { margin: 0 !important; }
+
 @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; animation: none !important; }
 }

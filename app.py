@@ -1133,7 +1133,7 @@ def _voltar_do_celular():
     if st.button("voltar", key="_btn_voltar_hw"):
         st.session_state.tela = pai
         st.rerun()
-    components.html("""
+    _iframe_invisivel("""
 <script>
 const P = window.parent;
 const SEL = ".st-key-_btn_voltar_hw button";
@@ -1155,7 +1155,20 @@ if (!P.__voltarHook) {
 }
 if (!(P.history.state && P.history.state.voltarApp)) { P.history.pushState({voltarApp: 1}, ""); }
 </script>
-""", height=0)
+""")
+
+
+def _iframe_invisivel(html_js: str):
+    """
+    Roda um script num iframe de altura zero. `st.components.v1.html` foi
+    marcado para remoção (o aviso dava prazo até 01/06/2026): quando ele sumir,
+    chamar ele derruba TODAS as telas menos a inicial. Por isso usa `st.iframe`
+    (versões novas) e só cai no antigo em Streamlit velho.
+    """
+    if hasattr(st, "iframe"):
+        st.iframe(html_js, height=1)
+    else:
+        components.html(html_js, height=0)
 
 
 # ── Roteador ──────────────────────────────────────────────────────────────────
