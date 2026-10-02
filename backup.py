@@ -418,10 +418,12 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
     return nome, gravou, sumiu
 
 
-def espelhar(origem: Path, destino: Path, mudam=(MARCA, "LEIA-ME.txt")) -> int:
+def espelhar(origem: Path, destino: Path, mudam=(MARCA, "LEIA-ME.txt"), diferentes: list | None = None) -> int:
     """
     Leva para destino o que existe em origem e falta lá. Nunca apaga. Só os arquivos de nome em
     `mudam` (marca, leia-me, listas) são atualizados; todo o resto, uma vez no destino, não é reescrito.
+    Se `diferentes` for uma lista, recebe os arquivos que já estão no destino com OUTRO tamanho
+    (alguém alterou ou o arquivo estragou): eles não são tocados, só apontados.
     """
     origem, destino = Path(origem), Path(destino)
     destino.mkdir(parents=True, exist_ok=True)
@@ -430,9 +432,17 @@ def espelhar(origem: Path, destino: Path, mudam=(MARCA, "LEIA-ME.txt")) -> int:
         if not arq.is_file() or arq.name.endswith(".parcial"):
             continue
         alvo = destino / arq.relative_to(origem)
-        fixo = arq.name not in mudam
-        if alvo.exists() and (fixo or alvo.read_bytes() == arq.read_bytes()):
-            continue
+        try:
+            tamanho_la = alvo.stat().st_size
+        except OSError:
+            tamanho_la = None
+        if tamanho_la is not None:
+            if arq.name not in mudam:
+                if diferentes is not None and tamanho_la != arq.stat().st_size:
+                    diferentes.append(str(arq.relative_to(origem)))
+                continue
+            if alvo.read_bytes() == arq.read_bytes():
+                continue
         alvo.parent.mkdir(parents=True, exist_ok=True)
         parcial = alvo.with_name(alvo.name + ".parcial")
         shutil.copyfile(arq, parcial)

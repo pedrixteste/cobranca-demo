@@ -19,9 +19,10 @@ drive_oauth_client_secret e drive_oauth_refresh_token (só é LIDO, na hora de r
 ele, e sem essas chaves no secrets deste projeto, o passo do Drive é pulado.
 
 Servidor fora do ar (notebook longe da empresa e sem Hamachi) não é erro: a cópia fica
-no notebook e é entregue na próxima vez. Só aparece um aviso na tela se passarem
-DIAS_SEM_AVISAR dias sem conseguir ler a planilha, entregar ao servidor ou gravar no
-Drive, ou se a planilha encolher.
+no notebook e é entregue na próxima vez. Só aparece um aviso na tela se uma etapa (ler a
+planilha, entregar ao servidor, gravar no Drive, copiar comprovantes) vier FALHANDO há
+DIAS_SEM_AVISAR dias, se a planilha encolher ou se um arquivo do servidor estiver
+diferente do original.
 
 Rodar na mão:  py ferramentas\\backup_no_servidor.py          (mostra o que fez)
 """
@@ -107,7 +108,8 @@ def main() -> int:
     PASTA_LOCAL.mkdir(parents=True, exist_ok=True)
     falas, erros = [], []
 
-    with open(RAIZ / ".streamlit" / "secrets.toml", "rb") as f:
+    # COBRANCA_BACKUP_SECRETS só existe para a simulação (ferramentas/simulacao_3_meses.py)
+    with open(os.environ.get("COBRANCA_BACKUP_SECRETS", RAIZ / ".streamlit" / "secrets.toml"), "rb") as f:
         secrets = tomllib.load(f)
     os.environ["GCP_SERVICE_ACCOUNT"] = json.dumps(dict(secrets["gcp_service_account"]))
 
@@ -116,8 +118,21 @@ def main() -> int:
         leia.write_text(LEIA_ME, encoding="utf-8")
 
     estado = _ler_estado()
-    # Enquanto nunca deu certo, os dias sem backup contam a partir da primeira tentativa
-    estado.setdefault("desde", agora.isoformat(timespec="seconds"))
+    estado.pop("desde", None)
+    falhando = estado.setdefault("falhando", {})
+    agora_iso = agora.isoformat(timespec="seconds")
+
+    def tentou(chave: str, deu_certo: bool):
+        """
+        O aviso conta há quanto tempo a etapa vem FALHANDO, não há quanto tempo deu certo pela
+        última vez: fim de semana, feriado e férias com o notebook desligado não são falha.
+        """
+        if deu_certo:
+            estado[chave] = agora_iso
+            falhando.pop(chave, None)
+        else:
+            falhando.setdefault(chave, agora_iso)
+
     leu = entregou = False
     try:
         copia = backup.ler_planilha(secrets["spreadsheet_id"])
@@ -126,57 +141,61 @@ def main() -> int:
         erros.append(f"não consegui ler a planilha: {type(e).__name__}: {e}")
     if leu:
         erros += backup.executar(copia, PASTA_LOCAL, saida=falas.append)
-        if not erros:
-            estado["leitura_ok"] = agora.isoformat(timespec="seconds")
+    # "encolheu" não é falha de leitura: a cópia foi lida e guardada, o alarme é outro
+    tentou("leitura_ok", leu and all("encolheu" in e for e in erros))
 
     # Drive: segundo caminho, além do robô da nuvem. Falhar aqui não é erro da rodada.
-    conferir = [("leitura_ok", "ler a planilha"), ("servidor_ok", "entregar a cópia ao servidor")]
     drive = None
     try:
         chaves = _chaves_drive(secrets)
         if chaves is None:
             falas.append("Drive: sem autorização neste notebook, pulando")
         else:
-            conferir.append(("drive_ok", "gravar a cópia no Drive"))
             drive = backup.servico_drive(chaves)
             if leu and not erros:
                 nome, gravou = backup.enviar_drive(copia, drive)
                 falas.append(f"Drive: {'cópia nova ' + nome if gravou else 'sem mudança desde ' + nome}")
-                estado["drive_ok"] = agora.isoformat(timespec="seconds")
+                tentou("drive_ok", True)
     except Exception as e:
         falas.append(f"Drive: não gravado agora ({type(e).__name__}: {e}); a nuvem cobre")
+        tentou("drive_ok", False)
 
     # Comprovantes: baixa do Drive só os que ainda não foram copiados (antes do espelho, para
     # já irem ao servidor nesta mesma rodada).
     if drive is not None and _CONFIG.get("comprovantes_drive"):
-        conferir.append(("comprovantes_ok", "copiar os comprovantes"))
         try:
             novos, total, falhas = backup_comprovantes.executar(
                 drive, _CONFIG["comprovantes_drive"], PASTA_LOCAL, copia if leu else None)
             falas.append(f"Comprovantes: {novos} novo(s), {total} guardado(s) no total")
             falas += [f"Comprovantes: não copiei {f}" for f in falhas]
-            if not falhas:
-                estado["comprovantes_ok"] = agora.isoformat(timespec="seconds")
+            tentou("comprovantes_ok", not falhas)
         except Exception as e:
             falas.append(f"Comprovantes: não copiados agora ({type(e).__name__}: {e})")
+            tentou("comprovantes_ok", False)
 
     # O espelho roda mesmo sem leitura nova: entrega o que ficou guardado no notebook.
+    diferentes = []
     try:
         if not PASTA_SERVIDOR.parent.exists():
             raise OSError("servidor fora do ar: sem rede da empresa nem Hamachi")
         levados = backup.espelhar(PASTA_LOCAL, PASTA_SERVIDOR, mudam=(
-            backup.MARCA, "LEIA-ME.txt", backup_comprovantes.INDICE, backup_comprovantes.LISTA))
+            backup.MARCA, "LEIA-ME.txt", backup_comprovantes.INDICE, backup_comprovantes.LISTA),
+            diferentes=diferentes)
         falas.append(f"Servidor: {levados} arquivo(s) levado(s) para {PASTA_SERVIDOR}")
         entregou = True
-        estado["servidor_ok"] = agora.isoformat(timespec="seconds")
     except Exception as e:
         falas.append(f"Servidor: não entregue agora ({e}); fica guardado no notebook")
+    tentou("servidor_ok", entregou)
 
     avisar = [e for e in erros if "encolheu" in e]
-    for chave, rotulo in conferir:
-        dias = _dias_desde(estado.get(chave) or estado["desde"], agora)
-        if dias >= DIAS_SEM_AVISAR:
-            avisar.append(f"Faz {int(dias)} dias que o backup não consegue {rotulo}.")
+    if diferentes:
+        falas.append(f"Servidor: {len(diferentes)} arquivo(s) DIFERENTE(S) do original do notebook: {diferentes[0]}")
+        avisar.append(f"{len(diferentes)} arquivo(s) de backup no servidor estão diferentes do original "
+                      f"(alguém alterou ou o arquivo estragou): {diferentes[0]}")
+    for chave, rotulo in (("leitura_ok", "ler a planilha"), ("servidor_ok", "entregar a cópia ao servidor"),
+                          ("drive_ok", "gravar a cópia no Drive"), ("comprovantes_ok", "copiar os comprovantes")):
+        if chave in falhando and _dias_desde(falhando[chave], agora) >= DIAS_SEM_AVISAR:
+            avisar.append(f"Faz {int(_dias_desde(falhando[chave], agora))} dias que o backup não consegue {rotulo}.")
     hoje = agora.strftime("%Y-%m-%d")
     if avisar and estado.get("avisou_em") != hoje:
         estado["avisou_em"] = hoje

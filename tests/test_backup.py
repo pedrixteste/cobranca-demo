@@ -172,6 +172,20 @@ class Pasta(unittest.TestCase):
         self.assertEqual(primeira.read_bytes(), antes)
         self.assertEqual(len(b.ultima_copia(self.pasta)["abas"]["_Cobrancas"]), 5)   # a mais nova vale
 
+    def test_espelho_aponta_arquivo_do_servidor_com_outro_tamanho_sem_mexer(self):
+        destino = Path(self._tmp.name) / "servidor"
+        b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
+        b.espelhar(self.pasta, destino)
+        la = destino / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.xlsx"
+        la.write_bytes(la.read_bytes() + b"estragado")
+        diferentes = []
+        self.assertEqual(b.espelhar(self.pasta, destino, diferentes=diferentes), 0)
+        self.assertEqual([Path(d).name for d in diferentes], ["2026-10-01 07h40 backup cobrancas.xlsx"])
+        self.assertTrue(la.read_bytes().endswith(b"estragado"))
+        limpo = []
+        b.espelhar(self.pasta, Path(self._tmp.name) / "outro", diferentes=limpo)
+        self.assertEqual(limpo, [])
+
     def test_espelho_nunca_reescreve_copia_datada(self):
         destino = Path(self._tmp.name) / "servidor"
         b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
