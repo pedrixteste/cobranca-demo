@@ -195,6 +195,16 @@ class Pasta(unittest.TestCase):
         b.espelhar(self.pasta, destino)
         self.assertEqual(la.read_text(encoding="utf-8"), "conteudo do servidor")
 
+    def test_cofre_guarda_so_o_json_e_dele_se_refaz_o_excel(self):
+        copia = b.montar("T", abas(3), DIA1)
+        nome, gravou, _ = b.salvar_pasta(copia, self.pasta, xlsx=False)
+        self.assertEqual(self.arquivos(), ["2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json", b.MARCA])
+        self.assertIn(nome + ".json", (self.pasta / b.MARCA).read_text(encoding="utf-8"))
+        _, gravou, _ = b.salvar_pasta(b.montar("T", abas(3), DIA2), self.pasta, xlsx=False)
+        self.assertFalse(gravou)
+        guardado = json.loads((self.pasta / "2026/10 - Outubro" / (nome + ".json")).read_text(encoding="utf-8"))
+        self.assertEqual(b.ler_xlsx(b.gerar_xlsx(guardado)), copia["abas"])
+
     def test_copia_em_formato_antigo_e_refeita_uma_vez(self):
         velha = b.montar("T", abas(), DIA1)
         velha["formato"] = 1

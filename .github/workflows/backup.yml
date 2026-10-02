@@ -54,7 +54,9 @@ jobs:
           SPREADSHEET_ID:      ${{ secrets.SPREADSHEET_ID }}
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           DRIVE_OAUTH:         ${{ secrets.DRIVE_OAUTH }}
-        run: python backup.py --pasta cofre --drive
+        # No cofre vai só o .json (o git guarda o histórico para sempre e Excel não compacta);
+        # o Drive continua recebendo o Excel completo.
+        run: python backup.py --pasta cofre --sem-xlsx --drive
 
       # Roda mesmo se o passo anterior acusou erro (planilha encolheu, Drive fora do ar):
       # a cópia que foi feita tem que ser guardada de qualquer jeito.

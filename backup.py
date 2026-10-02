@@ -17,6 +17,9 @@ Regras:
 
 Três destinos, independentes entre si:
   --pasta DIR     grava em DIR/AAAA/NN - Mês/ (o cofre do GitHub e a pasta do notebook)
+  --sem-xlsx      em --pasta guarda só o .json (usado no cofre do GitHub: o git guarda todo o
+                  histórico para sempre e Excel não compacta; o .json compacta e dele se refaz
+                  o Excel a qualquer hora com ferramentas/excel_do_backup.py)
   --espelho DIR   leva para DIR tudo que estiver em --pasta e ainda não estiver lá
                   (a pasta do servidor da empresa, que pode estar fora do ar)
   --drive         grava no Drive da empresa, pasta BACKUP / BACKUP COBRANCAS
@@ -398,8 +401,11 @@ def texto_marca(copia: dict, arquivo: str) -> str:
             "Cópia nova só é gravada quando algo muda na planilha; este arquivo é atualizado toda vez.\n")
 
 
-def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, bool, list[str]]:
-    """Guarda a cópia em pasta/AAAA/NN - Mês/. Devolve (nome do arquivo que vale, gravou agora?, o que sumiu)."""
+def salvar_pasta(copia: dict, pasta: Path, marca: bool = True, xlsx: bool = True) -> tuple[str, bool, list[str]]:
+    """
+    Guarda a cópia em pasta/AAAA/NN - Mês/. Devolve (nome do arquivo que vale, gravou agora?, o que sumiu).
+    Com xlsx=False guarda só o .json (a cópia exata), que é o que basta para reconstruir tudo.
+    """
     pasta = Path(pasta)
     anterior = ultima_copia(pasta)
     sumiu = encolheu(anterior, copia)
@@ -411,10 +417,11 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
             Path(pasta, *pastas_da_copia(n), n + ext).exists() for ext in (".xlsx", ".json")))
         nome, gravou = nome_arquivo(copia), True
         destino = Path(pasta, *pastas_da_copia(nome))
-        _gravar(destino / (nome + ".xlsx"), gerar_xlsx(copia))
+        if xlsx:
+            _gravar(destino / (nome + ".xlsx"), gerar_xlsx(copia))
         _gravar(destino / (nome + ".json"), gerar_json(copia))   # o .json por último: é ele que marca "cópia completa"
     if marca:
-        _gravar(pasta / MARCA, texto_marca(copia, nome + ".xlsx").encode("utf-8"))
+        _gravar(pasta / MARCA, texto_marca(copia, nome + (".xlsx" if xlsx else ".json")).encode("utf-8"))
     return nome, gravou, sumiu
 
 
@@ -545,7 +552,7 @@ def enviar_drive(copia: dict, service) -> tuple[str, bool]:
 # ── Execução ──────────────────────────────────────────────────────────────────
 
 def executar(copia: dict, pasta: Path | None = None, espelho: Path | None = None,
-             drive: bool = False, saida=print) -> list[str]:
+             drive: bool = False, saida=print, xlsx: bool = True) -> list[str]:
     """Roda os destinos pedidos; uma falha num destino não impede os outros. Devolve os erros."""
     erros = list(conferir(copia))
     if erros:
@@ -553,7 +560,7 @@ def executar(copia: dict, pasta: Path | None = None, espelho: Path | None = None
     saida("Planilha lida: " + ", ".join(f"{n} em {nome}" for nome, n in contagem(copia).items()))
     if pasta:
         try:
-            nome, gravou, sumiu = salvar_pasta(copia, pasta)
+            nome, gravou, sumiu = salvar_pasta(copia, pasta, xlsx=xlsx)
             saida(f"Pasta: {'cópia nova ' + nome if gravou else 'sem mudança desde ' + nome}")
             erros += [f"ATENÇÃO, a planilha encolheu: {s}" for s in sumiu]
         except Exception as e:
@@ -584,6 +591,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pasta", type=Path)
     ap.add_argument("--espelho", type=Path)
     ap.add_argument("--drive", action="store_true")
+    ap.add_argument("--sem-xlsx", action="store_true")
     args = ap.parse_args(argv)
     spreadsheet_id = _limpo(os.environ.get("SPREADSHEET_ID", ""))
     if not spreadsheet_id:
@@ -594,7 +602,7 @@ def main(argv=None) -> int:
     except Exception as e:
         print(f"ERRO ao ler a planilha: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
-    erros = executar(copia, args.pasta, args.espelho, args.drive)
+    erros = executar(copia, args.pasta, args.espelho, args.drive, xlsx=not args.sem_xlsx)
     for e in erros:
         print("ERRO: " + e, file=sys.stderr)
     return 1 if erros else 0

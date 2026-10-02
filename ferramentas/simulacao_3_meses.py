@@ -381,7 +381,7 @@ def rodar_nuvem():
     except Exception as e:
         RODADAS["nuvem_com_erro"].append((Relogio.agora, f"não leu a planilha: {e}"))
         return
-    erros = backup.executar(copia, pasta=COFRE, drive=True, saida=lambda *_: None)
+    erros = backup.executar(copia, pasta=COFRE, drive=True, saida=lambda *_: None, xlsx=False)
     if not any(e.startswith("pasta") for e in erros):
         guardou("cofre")
     if not any(e.startswith("Drive") for e in erros):
@@ -580,6 +580,10 @@ def conferir() -> list[tuple[str, bool, str]]:
             estragado = "SERVIDOR:" + arq.with_suffix(".xlsx").name in ESTRAGADOS and nome == "servidor"
             if c is None or backup.impressao_digital(c["abas"]) != c["impressao"]:
                 ruins.append(arq.name)
+            elif nome == "cofre":   # o cofre guarda só o .json: o Excel tem que poder ser refeito dele
+                if arq.with_suffix(".xlsx").exists() or (arq is copias[-1][0]
+                                                         and backup.ler_xlsx(backup.gerar_xlsx(c)) != c["abas"]):
+                    ruins.append(arq.name)
             elif not estragado and backup.ler_xlsx(arq.with_suffix(".xlsx").read_bytes()) != c["abas"]:
                 ruins.append(arq.with_suffix(".xlsx").name)
             if arq.relative_to(raiz).parts[:-1] != backup.pastas_da_copia(arq.name):
@@ -588,7 +592,8 @@ def conferir() -> list[tuple[str, bool, str]]:
                 repetidas.append(arq.name)
             anterior = c["impressao"] if c else anterior
         impressoes[nome] = {c["impressao"] for _, c in copias if c}
-        r.append((f"{nome}: toda cópia abre e o Excel bate com a cópia exata", not ruins, f"{len(copias)} cópias" if not ruins else f"ruins: {ruins[:3]}"))
+        r.append((f"{nome}: toda cópia abre e " + ("é só a cópia exata, sem Excel" if nome == "cofre"
+                                                 else "o Excel bate com a cópia exata"), not ruins, f"{len(copias)} cópias" if not ruins else f"ruins: {ruins[:3]}"))
         r.append((f"{nome}: cada cópia na pasta do seu ano e mês", not fora_do_lugar, "ok" if not fora_do_lugar else str(fora_do_lugar[:3])))
         r.append((f"{nome}: nenhuma cópia repetida à toa", not repetidas, "ok" if not repetidas else str(repetidas[:3])))
     no_drive = sorted((a for a in DRIVE.arqs.values() if a["appProperties"].get("tipo") == "backup-cobrancas"),
