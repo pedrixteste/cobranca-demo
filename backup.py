@@ -15,7 +15,7 @@ Regras:
     nova é guardada do mesmo jeito, mas o programa sai com erro para alguém olhar.
 
 Três destinos, independentes entre si:
-  --pasta DIR     grava em DIR/AAAA/ (o cofre do GitHub e a pasta do notebook)
+  --pasta DIR     grava em DIR/AAAA/NN - Mês/ (o cofre do GitHub e a pasta do notebook)
   --espelho DIR   leva para DIR tudo que estiver em --pasta e ainda não estiver lá
                   (a pasta do servidor da empresa, que pode estar fora do ar)
   --drive         grava no Drive da empresa, pasta BACKUP / BACKUP COBRANCAS
@@ -49,6 +49,10 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 ABAS_OBRIGATORIAS = ("_Cobrancas", "_Parcelas")
 # O nome começa pela data (ano na frente): na pasta, a ordem por nome já é a ordem do tempo
 SUFIXO = " backup cobrancas"
+# Uma pasta por mês dentro da pasta do ano (mesmo formato das pastas de comprovante)
+MESES_PASTA = ["01 - Janeiro", "02 - Fevereiro", "03 - Março", "04 - Abril", "05 - Maio", "06 - Junho",
+               "07 - Julho", "08 - Agosto", "09 - Setembro", "10 - Outubro", "11 - Novembro",
+               "12 - Dezembro"]
 MARCA = "ULTIMA_CONFERENCIA.txt"
 ABA_LEIAME = "LEIA-ME"
 # Abas do Excel feitas para gente ler (amarelas); as outras são a cópia exata da planilha
@@ -168,6 +172,11 @@ def encolheu(antes: dict | None, agora: dict) -> list[str]:
 def nome_arquivo(copia: dict) -> str:
     quando = datetime.fromisoformat(copia["feito_em"])
     return quando.strftime("%Y-%m-%d %Hh%M") + SUFIXO
+
+
+def pastas_da_copia(nome: str) -> tuple[str, str]:
+    """(ano, mês) onde a cópia mora, tirados do próprio nome: "2026", "10 - Outubro"."""
+    return nome[:4], MESES_PASTA[int(nome[5:7]) - 1]
 
 
 def gerar_json(copia: dict) -> bytes:
@@ -351,8 +360,8 @@ def ler_xlsx(conteudo: bytes) -> dict:
 
 
 def ultima_copia(pasta: Path) -> dict | None:
-    """A cópia mais recente guardada na pasta (o nome do arquivo já ordena por data)."""
-    for arq in sorted(Path(pasta).glob(f"*/*{SUFIXO}.json"), key=lambda p: p.name, reverse=True):
+    """A cópia mais recente guardada na pasta, em qualquer subpasta (o nome do arquivo já ordena por data)."""
+    for arq in sorted(Path(pasta).rglob(f"*{SUFIXO}.json"), key=lambda p: p.name, reverse=True):
         try:
             return json.loads(arq.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -378,7 +387,7 @@ def texto_marca(copia: dict, arquivo: str) -> str:
 
 
 def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, bool, list[str]]:
-    """Guarda a cópia em pasta/AAAA/. Devolve (nome do arquivo que vale, gravou agora?, o que sumiu)."""
+    """Guarda a cópia em pasta/AAAA/NN - Mês/. Devolve (nome do arquivo que vale, gravou agora?, o que sumiu)."""
     pasta = Path(pasta)
     anterior = ultima_copia(pasta)
     sumiu = encolheu(anterior, copia)
@@ -387,7 +396,7 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
         nome, gravou = nome_arquivo(anterior), False
     else:
         nome, gravou = nome_arquivo(copia), True
-        destino = pasta / nome[:4]
+        destino = Path(pasta, *pastas_da_copia(nome))
         _gravar(destino / (nome + ".xlsx"), gerar_xlsx(copia))
         _gravar(destino / (nome + ".json"), gerar_json(copia))   # o .json por último: é ele que marca "cópia completa"
     if marca:
@@ -479,14 +488,15 @@ def enviar_drive(copia: dict, service) -> tuple[str, bool]:
         nome, gravou = recentes[0]["name"].rsplit(".", 1)[0], False
     else:
         nome, gravou = nome_arquivo(copia), True
-        ano = _pasta_drive(service, nome[:4], raiz)
+        ano, mes = pastas_da_copia(nome)
+        destino = _pasta_drive(service, mes, _pasta_drive(service, ano, raiz))
         # Só o .json (enviado por último) leva a etiqueta: se o envio cair no meio, a próxima rodada refaz
         etiqueta = {"tipo": "backup-cobrancas", "impressao": copia["impressao"],
                     "formato": str(copia["formato"])}
         for ext, conteudo, mime, marcas in ((".xlsx", gerar_xlsx(copia), _MIME_XLSX, {}),
                                            (".json", gerar_json(copia), "application/json", etiqueta)):
             service.files().create(
-                body={"name": nome + ext, "parents": [ano], "appProperties": marcas},
+                body={"name": nome + ext, "parents": [destino], "appProperties": marcas},
                 media_body=MediaIoBaseUpload(io.BytesIO(conteudo), mimetype=mime, resumable=False),
                 fields="id").execute()
     marca = MediaIoBaseUpload(io.BytesIO(texto_marca(copia, nome + ".xlsx").encode("utf-8")),

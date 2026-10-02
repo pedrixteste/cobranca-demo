@@ -135,17 +135,31 @@ class Pasta(unittest.TestCase):
         self.assertEqual((nome, gravou, sumiu), ("2026-10-01 07h40 backup cobrancas", True, []))
         nome2, gravou2, _ = b.salvar_pasta(b.montar("T", abas(), DIA2), self.pasta)
         self.assertEqual((nome2, gravou2), (nome, False))
-        self.assertEqual(self.arquivos(), ["2026/2026-10-01 07h40 backup cobrancas.json",
-                                           "2026/2026-10-01 07h40 backup cobrancas.xlsx", b.MARCA])
+        self.assertEqual(self.arquivos(), ["2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json",
+                                           "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.xlsx", b.MARCA])
         self.assertIn("02/10/2026 às 13:00", (self.pasta / b.MARCA).read_text(encoding="utf-8"))
 
     def test_mudou_grava_outra_e_guarda_a_antiga(self):
         b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
-        antiga = (self.pasta / "2026/2026-10-01 07h40 backup cobrancas.json").read_bytes()
+        antiga = (self.pasta / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json").read_bytes()
         _, gravou, _ = b.salvar_pasta(b.montar("T", abas(3), DIA2), self.pasta)
         self.assertTrue(gravou)
         self.assertEqual(len(self.arquivos()), 5)
-        self.assertEqual((self.pasta / "2026/2026-10-01 07h40 backup cobrancas.json").read_bytes(), antiga)
+        self.assertEqual((self.pasta / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json").read_bytes(), antiga)
+
+    def test_cada_mes_na_sua_pasta_e_a_ultima_vale_entre_meses(self):
+        novembro = datetime(2026, 11, 3, 7, 40, tzinfo=b.TIMEZONE)
+        janeiro = datetime(2027, 1, 4, 7, 40, tzinfo=b.TIMEZONE)
+        b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
+        b.salvar_pasta(b.montar("T", abas(3), novembro), self.pasta)
+        b.salvar_pasta(b.montar("T", abas(4), janeiro), self.pasta)
+        self.assertEqual([a for a in self.arquivos() if a.endswith(".xlsx")],
+                         ["2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.xlsx",
+                          "2026/11 - Novembro/2026-11-03 07h40 backup cobrancas.xlsx",
+                          "2027/01 - Janeiro/2027-01-04 07h40 backup cobrancas.xlsx"])
+        self.assertEqual(b.ultima_copia(self.pasta)["feito_em"], janeiro.isoformat(timespec="seconds"))
+        _, gravou, _ = b.salvar_pasta(b.montar("T", abas(4), janeiro.replace(day=5)), self.pasta)
+        self.assertFalse(gravou)
 
     def test_copia_em_formato_antigo_e_refeita_uma_vez(self):
         velha = b.montar("T", abas(), DIA1)
@@ -165,13 +179,13 @@ class Pasta(unittest.TestCase):
     def test_json_guardado_reconstroi_a_planilha(self):
         copia = b.montar("T", abas(), DIA1)
         b.salvar_pasta(copia, self.pasta)
-        lido = json.loads((self.pasta / "2026/2026-10-01 07h40 backup cobrancas.json").read_text(encoding="utf-8"))
+        lido = json.loads((self.pasta / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json").read_text(encoding="utf-8"))
         self.assertEqual(lido["abas"], copia["abas"])
         self.assertEqual(b.impressao_digital(lido["abas"]), lido["impressao"])
 
     def test_json_cortado_no_meio_e_ignorado(self):
         b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
-        (self.pasta / "2026/2026-10-05 09h00 backup cobrancas.json").write_text('{"abas": {', encoding="utf-8")
+        (self.pasta / "2026/10 - Outubro/2026-10-05 09h00 backup cobrancas.json").write_text('{"abas": {', encoding="utf-8")
         self.assertEqual(b.ultima_copia(self.pasta)["feito_em"], DIA1.isoformat(timespec="seconds"))
 
     def test_espelho_leva_so_o_que_falta_e_nunca_apaga(self):
@@ -200,7 +214,7 @@ class Execucao(unittest.TestCase):
             erros = b.executar(b.montar("T", abas(), DIA1), Path(tmp) / "c", bloqueio / "dentro",
                                saida=lambda *_: None)
             self.assertEqual(len(erros), 1)
-            self.assertTrue((Path(tmp) / "c/2026/2026-10-01 07h40 backup cobrancas.json").exists())
+            self.assertTrue((Path(tmp) / "c/2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json").exists())
 
     def test_drive_sem_chave_e_pulado_sem_erro(self):
         import os
