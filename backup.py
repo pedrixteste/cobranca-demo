@@ -10,7 +10,8 @@ Cada cópia é a planilha INTEIRA (todas as abas), em dois arquivos iguais em co
 Regras:
   - cópia nova só quando algo MUDOU desde a última (a impressão digital do conteúdo
     é comparada); sem mudança, só atualiza o ULTIMA_CONFERENCIA.txt;
-  - nenhuma cópia antiga é apagada nem reescrita;
+  - nenhuma cópia antiga é apagada nem reescrita (duas cópias diferentes no mesmo minuto: a
+    nova ganha o minuto seguinte no nome);
   - se a planilha ENCOLHEU (cobrança sumiu, aba sumiu, muita parcela sumiu), a cópia
     nova é guardada do mesmo jeito, mas o programa sai com erro para alguém olhar.
 
@@ -38,7 +39,7 @@ import json
 import os
 import shutil
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -172,6 +173,17 @@ def encolheu(antes: dict | None, agora: dict) -> list[str]:
 def nome_arquivo(copia: dict) -> str:
     quando = datetime.fromisoformat(copia["feito_em"])
     return quando.strftime("%Y-%m-%d %Hh%M") + SUFIXO
+
+
+def no_minuto_livre(copia: dict, ocupado) -> dict:
+    """
+    Se já existe cópia com este nome (a planilha mudou duas vezes no mesmo minuto), a nova ganha
+    o minuto seguinte. Assim nenhuma cópia antiga pode ser sobrescrita.
+    """
+    while ocupado(nome_arquivo(copia)):
+        quando = datetime.fromisoformat(copia["feito_em"]) + timedelta(minutes=1)
+        copia = {**copia, "feito_em": quando.isoformat(timespec="seconds")}
+    return copia
 
 
 def pastas_da_copia(nome: str) -> tuple[str, str]:
@@ -395,6 +407,8 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
             and anterior.get("formato") == copia["formato"]):
         nome, gravou = nome_arquivo(anterior), False
     else:
+        copia = no_minuto_livre(copia, lambda n: any(
+            Path(pasta, *pastas_da_copia(n), n + ext).exists() for ext in (".xlsx", ".json")))
         nome, gravou = nome_arquivo(copia), True
         destino = Path(pasta, *pastas_da_copia(nome))
         _gravar(destino / (nome + ".xlsx"), gerar_xlsx(copia))
@@ -405,7 +419,7 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
 
 
 def espelhar(origem: Path, destino: Path) -> int:
-    """Leva para destino o que existe em origem e falta lá (ou está com outro tamanho). Nunca apaga."""
+    """Leva para destino o que existe em origem e falta lá. Nunca apaga; cópia datada nunca é reescrita."""
     origem, destino = Path(origem), Path(destino)
     destino.mkdir(parents=True, exist_ok=True)
     levados = 0
@@ -414,8 +428,7 @@ def espelhar(origem: Path, destino: Path) -> int:
             continue
         alvo = destino / arq.relative_to(origem)
         fixo = SUFIXO in arq.name   # cópia datada nunca muda; os outros (marca, leia-me) mudam
-        if (alvo.exists() and alvo.stat().st_size == arq.stat().st_size
-                and (fixo or alvo.read_bytes() == arq.read_bytes())):
+        if alvo.exists() and (fixo or alvo.read_bytes() == arq.read_bytes()):
             continue
         alvo.parent.mkdir(parents=True, exist_ok=True)
         parcial = alvo.with_name(alvo.name + ".parcial")
@@ -487,6 +500,11 @@ def enviar_drive(copia: dict, service) -> tuple[str, bool]:
     if props.get("impressao") == copia["impressao"] and props.get("formato") == str(copia["formato"]):
         nome, gravou = recentes[0]["name"].rsplit(".", 1)[0], False
     else:
+        def ocupado(n):
+            return bool(service.files().list(
+                q=f"(name = '{n}.xlsx' or name = '{n}.json') and trashed = false",
+                fields="files(id)", pageSize=1).execute().get("files"))
+        copia = no_minuto_livre(copia, ocupado)
         nome, gravou = nome_arquivo(copia), True
         ano, mes = pastas_da_copia(nome)
         destino = _pasta_drive(service, mes, _pasta_drive(service, ano, raiz))

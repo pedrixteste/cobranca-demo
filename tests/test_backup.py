@@ -161,6 +161,26 @@ class Pasta(unittest.TestCase):
         _, gravou, _ = b.salvar_pasta(b.montar("T", abas(4), janeiro.replace(day=5)), self.pasta)
         self.assertFalse(gravou)
 
+    def test_duas_copias_no_mesmo_minuto_a_nova_ganha_o_minuto_seguinte(self):
+        b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
+        primeira = self.pasta / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json"
+        antes = primeira.read_bytes()
+        nome, gravou, _ = b.salvar_pasta(b.montar("T", abas(3), DIA1.replace(second=50)), self.pasta)
+        self.assertEqual((nome, gravou), ("2026-10-01 07h41 backup cobrancas", True))
+        nome, gravou, _ = b.salvar_pasta(b.montar("T", abas(4), DIA1.replace(second=55)), self.pasta)
+        self.assertEqual((nome, gravou), ("2026-10-01 07h42 backup cobrancas", True))
+        self.assertEqual(primeira.read_bytes(), antes)
+        self.assertEqual(len(b.ultima_copia(self.pasta)["abas"]["_Cobrancas"]), 5)   # a mais nova vale
+
+    def test_espelho_nunca_reescreve_copia_datada(self):
+        destino = Path(self._tmp.name) / "servidor"
+        b.salvar_pasta(b.montar("T", abas(2), DIA1), self.pasta)
+        b.espelhar(self.pasta, destino)
+        la = destino / "2026/10 - Outubro/2026-10-01 07h40 backup cobrancas.json"
+        la.write_text("conteudo do servidor", encoding="utf-8")
+        b.espelhar(self.pasta, destino)
+        self.assertEqual(la.read_text(encoding="utf-8"), "conteudo do servidor")
+
     def test_copia_em_formato_antigo_e_refeita_uma_vez(self):
         velha = b.montar("T", abas(), DIA1)
         velha["formato"] = 1
