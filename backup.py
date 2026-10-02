@@ -3,8 +3,8 @@
 Cópia de segurança da planilha de cobranças. Só LÊ a planilha, nunca escreve nela.
 
 Cada cópia é a planilha INTEIRA (todas as abas), em dois arquivos iguais em conteúdo:
-  Cobrancas_AAAA-MM-DD_HHhMM.xlsx   para abrir no Excel ou no Google Planilhas
-  Cobrancas_AAAA-MM-DD_HHhMM.json   o mesmo, exato, para reconstruir a planilha
+  AAAA-MM-DD HHhMM backup cobrancas.xlsx   para abrir no Excel ou no Google Planilhas
+  AAAA-MM-DD HHhMM backup cobrancas.json   o mesmo, exato, para reconstruir a planilha
                                      (ferramentas/restaurar_backup.py)
 
 Regras:
@@ -18,7 +18,8 @@ Três destinos, independentes entre si:
   --pasta DIR     grava em DIR/AAAA/ (o cofre do GitHub e a pasta do notebook)
   --espelho DIR   leva para DIR tudo que estiver em --pasta e ainda não estiver lá
                   (a pasta do servidor da empresa, que pode estar fora do ar)
-  --drive         grava no Drive da empresa, pasta "Cobranças Vithall - Backups"
+  --drive         grava no Drive da empresa, pasta BACKUP / BACKUP COBRANCAS
+                  (a mesma organização do servidor: uma pasta geral, uma subpasta por sistema)
 
 Variáveis de ambiente:
   SPREADSHEET_ID       planilha
@@ -46,7 +47,8 @@ TIMEZONE = ZoneInfo("America/Sao_Paulo")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 ABAS_OBRIGATORIAS = ("_Cobrancas", "_Parcelas")
-PREFIXO = "Cobrancas_"
+# O nome começa pela data (ano na frente): na pasta, a ordem por nome já é a ordem do tempo
+SUFIXO = " backup cobrancas"
 MARCA = "ULTIMA_CONFERENCIA.txt"
 ABA_LEIAME = "LEIA-ME"
 # Abas do Excel feitas para gente ler (amarelas); as outras são a cópia exata da planilha
@@ -55,7 +57,8 @@ COR_LEITURA = "F2DD82"
 # Sobe quando o arquivo de backup ganha algo novo: a próxima rodada grava uma cópia no formato
 # novo mesmo sem mudança na planilha (2 = o Excel ganhou as abas de leitura)
 FORMATO = 2
-PASTA_DRIVE = "Cobranças Vithall - Backups"
+PASTA_DRIVE_GERAL = "BACKUP"          # pasta geral de backups (outros sistemas ganham a própria subpasta)
+PASTA_DRIVE = "BACKUP COBRANCAS"      # mesmo nome da pasta do servidor
 # Parcela pode ser removida pelo app (editar cobrança); só acusa sumiço em massa
 QUEDA_PARCELAS = 0.20
 
@@ -164,7 +167,7 @@ def encolheu(antes: dict | None, agora: dict) -> list[str]:
 
 def nome_arquivo(copia: dict) -> str:
     quando = datetime.fromisoformat(copia["feito_em"])
-    return PREFIXO + quando.strftime("%Y-%m-%d_%Hh%M")
+    return quando.strftime("%Y-%m-%d %Hh%M") + SUFIXO
 
 
 def gerar_json(copia: dict) -> bytes:
@@ -349,7 +352,7 @@ def ler_xlsx(conteudo: bytes) -> dict:
 
 def ultima_copia(pasta: Path) -> dict | None:
     """A cópia mais recente guardada na pasta (o nome do arquivo já ordena por data)."""
-    for arq in sorted(Path(pasta).glob(f"*/{PREFIXO}*.json"), key=lambda p: p.name, reverse=True):
+    for arq in sorted(Path(pasta).glob(f"*/*{SUFIXO}.json"), key=lambda p: p.name, reverse=True):
         try:
             return json.loads(arq.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -384,7 +387,7 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
         nome, gravou = nome_arquivo(anterior), False
     else:
         nome, gravou = nome_arquivo(copia), True
-        destino = pasta / nome[len(PREFIXO):len(PREFIXO) + 4]
+        destino = pasta / nome[:4]
         _gravar(destino / (nome + ".xlsx"), gerar_xlsx(copia))
         _gravar(destino / (nome + ".json"), gerar_json(copia))   # o .json por último: é ele que marca "cópia completa"
     if marca:
@@ -401,7 +404,7 @@ def espelhar(origem: Path, destino: Path) -> int:
         if not arq.is_file() or arq.name.endswith(".parcial"):
             continue
         alvo = destino / arq.relative_to(origem)
-        fixo = arq.name.startswith(PREFIXO)   # cópia datada nunca muda; os outros (marca, leia-me) mudam
+        fixo = SUFIXO in arq.name   # cópia datada nunca muda; os outros (marca, leia-me) mudam
         if (alvo.exists() and alvo.stat().st_size == arq.stat().st_size
                 and (fixo or alvo.read_bytes() == arq.read_bytes())):
             continue
@@ -434,25 +437,40 @@ def servico_drive(cred: dict):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def _pasta_drive(service, nome: str, pai: str | None) -> str:
+def _achar_pasta(service, nome: str, pai: str | None) -> str | None:
+    """Sem pai, procura a pasta ONDE ELA ESTIVER no Drive (a mais antiga, se houver duas)."""
     seguro = nome.replace("\\", "\\\\").replace("'", "\\'")
-    onde = f"'{pai}' in parents" if pai else "'root' in parents"
+    onde = f" and '{pai}' in parents" if pai else ""
     achados = service.files().list(
-        q=f"name = '{seguro}' and {onde} and mimeType = '{_MIME_PASTA}' and trashed = false",
-        fields="files(id)", pageSize=1).execute().get("files", [])
-    if achados:
-        return achados[0]["id"]
+        q=f"name = '{seguro}'{onde} and mimeType = '{_MIME_PASTA}' and trashed = false",
+        orderBy="createdTime", fields="files(id)", pageSize=1).execute().get("files", [])
+    return achados[0]["id"] if achados else None
+
+
+def _pasta_drive(service, nome: str, pai: str | None) -> str:
+    achada = _achar_pasta(service, nome, pai)
+    if achada:
+        return achada
     corpo = {"name": nome, "mimeType": _MIME_PASTA}
     if pai:
         corpo["parents"] = [pai]
     return service.files().create(body=corpo, fields="id").execute()["id"]
 
 
+def pasta_backup_drive(service) -> str:
+    """
+    A pasta das cópias. Vale onde ela estiver (o dono pode arrastá-la de lugar sem quebrar nada);
+    se não existir em lugar nenhum, nasce em BACKUP / BACKUP COBRANCAS.
+    """
+    return (_achar_pasta(service, PASTA_DRIVE, None)
+            or _pasta_drive(service, PASTA_DRIVE, _pasta_drive(service, PASTA_DRIVE_GERAL, None)))
+
+
 def enviar_drive(copia: dict, service) -> tuple[str, bool]:
     """Mesma regra da pasta: cópia nova só se mudou; a marca é atualizada sempre."""
     from googleapiclient.http import MediaIoBaseUpload
 
-    raiz = _pasta_drive(service, PASTA_DRIVE, None)
+    raiz = pasta_backup_drive(service)
     recentes = service.files().list(
         q="appProperties has { key='tipo' and value='backup-cobrancas' } and trashed = false",
         orderBy="name desc", pageSize=1, fields="files(name, appProperties)").execute().get("files", [])
@@ -461,7 +479,7 @@ def enviar_drive(copia: dict, service) -> tuple[str, bool]:
         nome, gravou = recentes[0]["name"].rsplit(".", 1)[0], False
     else:
         nome, gravou = nome_arquivo(copia), True
-        ano = _pasta_drive(service, nome[len(PREFIXO):len(PREFIXO) + 4], raiz)
+        ano = _pasta_drive(service, nome[:4], raiz)
         # Só o .json (enviado por último) leva a etiqueta: se o envio cair no meio, a próxima rodada refaz
         etiqueta = {"tipo": "backup-cobrancas", "impressao": copia["impressao"],
                     "formato": str(copia["formato"])}

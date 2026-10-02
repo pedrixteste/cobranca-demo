@@ -41,14 +41,14 @@ DIAS_SEM_AVISAR = 3
 
 LEIA_ME = """BACKUP DAS COBRANÇAS VITHALL
 
-Cada arquivo Cobrancas_AAAA-MM-DD_HHhMM é a planilha de cobranças INTEIRA naquele momento.
+Cada arquivo "AAAA-MM-DD HHhMM backup cobrancas" é a planilha de cobranças INTEIRA naquele momento.
   .xlsx  abre no Excel ou no Google Planilhas
   .json  o mesmo conteúdo, usado para reconstruir a planilha do app
 
 Um arquivo novo só aparece quando algo mudou na planilha. Nenhum arquivo antigo é apagado.
 ULTIMA_CONFERENCIA.txt mostra quando foi a última vez que a cópia foi conferida.
 
-Existem mais duas cópias iguais a esta: no Drive da empresa (pasta "Cobranças Vithall - Backups")
+Existem mais duas cópias iguais a esta: no Drive da empresa (pasta BACKUP / BACKUP COBRANCAS)
 e no GitHub (repositório privado do app, ramo "backup").
 
 NÃO apague nem edite estes arquivos.

@@ -4,7 +4,7 @@ Reconstrói a planilha de cobranças a partir de um arquivo .json de backup.
 Passo a passo (quando a planilha original foi perdida ou estragada):
   1. No Google Planilhas, crie uma planilha em branco.
   2. Compartilhe com o robô do app, como EDITOR (o e-mail está em client_email, no secrets).
-  3. Rode:  py ferramentas\\restaurar_backup.py CAMINHO\\Cobrancas_AAAA-MM-DD_HHhMM.json ID_DA_PLANILHA_NOVA
+  3. Rode:  py ferramentas\\restaurar_backup.py "CAMINHO\\AAAA-MM-DD HHhMM backup cobrancas.json" ID_DA_PLANILHA_NOVA
      (o ID é o trecho do endereço entre /d/ e /edit)
   4. Troque o spreadsheet_id nos Secrets do app (Streamlit) e do aviso diário (GitHub).
 
