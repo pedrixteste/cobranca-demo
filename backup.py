@@ -418,8 +418,11 @@ def salvar_pasta(copia: dict, pasta: Path, marca: bool = True) -> tuple[str, boo
     return nome, gravou, sumiu
 
 
-def espelhar(origem: Path, destino: Path) -> int:
-    """Leva para destino o que existe em origem e falta lá. Nunca apaga; cópia datada nunca é reescrita."""
+def espelhar(origem: Path, destino: Path, mudam=(MARCA, "LEIA-ME.txt")) -> int:
+    """
+    Leva para destino o que existe em origem e falta lá. Nunca apaga. Só os arquivos de nome em
+    `mudam` (marca, leia-me, listas) são atualizados; todo o resto, uma vez no destino, não é reescrito.
+    """
     origem, destino = Path(origem), Path(destino)
     destino.mkdir(parents=True, exist_ok=True)
     levados = 0
@@ -427,7 +430,7 @@ def espelhar(origem: Path, destino: Path) -> int:
         if not arq.is_file() or arq.name.endswith(".parcial"):
             continue
         alvo = destino / arq.relative_to(origem)
-        fixo = SUFIXO in arq.name   # cópia datada nunca muda; os outros (marca, leia-me) mudam
+        fixo = arq.name not in mudam
         if alvo.exists() and (fixo or alvo.read_bytes() == arq.read_bytes()):
             continue
         alvo.parent.mkdir(parents=True, exist_ok=True)

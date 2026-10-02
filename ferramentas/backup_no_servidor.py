@@ -6,11 +6,14 @@ de Tarefas do Windows: ao entrar no Windows e duas vezes por dia).
   2. leva para a pasta do servidor tudo que ainda não está lá;
   3. grava no Drive da empresa, se a cópia de lá estiver desatualizada. O robô da nuvem
      também grava no Drive: são dois caminhos de propósito, para o Drive não depender só
-     do GitHub. Quem chega depois vê que a cópia já está lá e não duplica.
+     do GitHub. Quem chega depois vê que a cópia já está lá e não duplica;
+  4. baixa do Drive os comprovantes que ainda não foram copiados (backup_comprovantes.py),
+     que seguem para o servidor junto com o resto.
 
 As pastas ficam em backup.local.json, na raiz do projeto (fora do git, porque o código
 também vai para o repositório público da demonstração):
-  {"pasta_notebook": "...", "pasta_servidor": "...", "chaves_drive": "..."}
+  {"pasta_notebook": "...", "pasta_servidor": "...", "chaves_drive": "...",
+   "comprovantes_drive": "id da pasta de comprovantes no Drive"}
 "chaves_drive" é opcional: caminho de um secrets.toml que tenha drive_oauth_client_id,
 drive_oauth_client_secret e drive_oauth_refresh_token (só é LIDO, na hora de rodar). Sem
 ele, e sem essas chaves no secrets deste projeto, o passo do Drive é pulado.
@@ -35,6 +38,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ))
 
 import backup  # noqa: E402
+import backup_comprovantes  # noqa: E402
 
 with open(os.environ.get("COBRANCA_BACKUP_CONFIG", RAIZ / "backup.local.json"), encoding="utf-8") as _f:
     _CONFIG = json.load(_f)
@@ -56,6 +60,11 @@ ULTIMA_CONFERENCIA.txt mostra quando foi a última vez que a cópia foi conferid
 
 Existem mais duas cópias iguais a esta: no Drive da empresa (pasta BACKUP / BACKUP COBRANCAS)
 e no GitHub (repositório privado do app, ramo "backup").
+
+COMPROVANTES: as fotos e PDFs de comprovante que o app guarda no Drive, cada um copiado uma
+única vez, com a data do pagamento na frente do nome, separados por ano e mês.
+"LISTA DE COMPROVANTES.xlsx" diz de quem é cada arquivo. O arquivo indice.json é o controle
+do que já foi copiado.
 
 NÃO apague nem edite estes arquivos.
 """
@@ -120,31 +129,48 @@ def main() -> int:
         if not erros:
             estado["leitura_ok"] = agora.isoformat(timespec="seconds")
 
-    # O espelho roda mesmo sem leitura nova: entrega o que ficou guardado no notebook.
-    try:
-        if not PASTA_SERVIDOR.parent.exists():
-            raise OSError("servidor fora do ar: sem rede da empresa nem Hamachi")
-        levados = backup.espelhar(PASTA_LOCAL, PASTA_SERVIDOR)
-        falas.append(f"Servidor: {levados} arquivo(s) levado(s) para {PASTA_SERVIDOR}")
-        entregou = True
-        estado["servidor_ok"] = agora.isoformat(timespec="seconds")
-    except Exception as e:
-        falas.append(f"Servidor: não entregue agora ({e}); fica guardado no notebook")
-
     # Drive: segundo caminho, além do robô da nuvem. Falhar aqui não é erro da rodada.
     conferir = [("leitura_ok", "ler a planilha"), ("servidor_ok", "entregar a cópia ao servidor")]
+    drive = None
     try:
         chaves = _chaves_drive(secrets)
         if chaves is None:
             falas.append("Drive: sem autorização neste notebook, pulando")
         else:
             conferir.append(("drive_ok", "gravar a cópia no Drive"))
+            drive = backup.servico_drive(chaves)
             if leu and not erros:
-                nome, gravou = backup.enviar_drive(copia, backup.servico_drive(chaves))
+                nome, gravou = backup.enviar_drive(copia, drive)
                 falas.append(f"Drive: {'cópia nova ' + nome if gravou else 'sem mudança desde ' + nome}")
                 estado["drive_ok"] = agora.isoformat(timespec="seconds")
     except Exception as e:
         falas.append(f"Drive: não gravado agora ({type(e).__name__}: {e}); a nuvem cobre")
+
+    # Comprovantes: baixa do Drive só os que ainda não foram copiados (antes do espelho, para
+    # já irem ao servidor nesta mesma rodada).
+    if drive is not None and _CONFIG.get("comprovantes_drive"):
+        conferir.append(("comprovantes_ok", "copiar os comprovantes"))
+        try:
+            novos, total, falhas = backup_comprovantes.executar(
+                drive, _CONFIG["comprovantes_drive"], PASTA_LOCAL, copia if leu else None)
+            falas.append(f"Comprovantes: {novos} novo(s), {total} guardado(s) no total")
+            falas += [f"Comprovantes: não copiei {f}" for f in falhas]
+            if not falhas:
+                estado["comprovantes_ok"] = agora.isoformat(timespec="seconds")
+        except Exception as e:
+            falas.append(f"Comprovantes: não copiados agora ({type(e).__name__}: {e})")
+
+    # O espelho roda mesmo sem leitura nova: entrega o que ficou guardado no notebook.
+    try:
+        if not PASTA_SERVIDOR.parent.exists():
+            raise OSError("servidor fora do ar: sem rede da empresa nem Hamachi")
+        levados = backup.espelhar(PASTA_LOCAL, PASTA_SERVIDOR, mudam=(
+            backup.MARCA, "LEIA-ME.txt", backup_comprovantes.INDICE, backup_comprovantes.LISTA))
+        falas.append(f"Servidor: {levados} arquivo(s) levado(s) para {PASTA_SERVIDOR}")
+        entregou = True
+        estado["servidor_ok"] = agora.isoformat(timespec="seconds")
+    except Exception as e:
+        falas.append(f"Servidor: não entregue agora ({e}); fica guardado no notebook")
 
     avisar = [e for e in erros if "encolheu" in e]
     for chave, rotulo in conferir:
