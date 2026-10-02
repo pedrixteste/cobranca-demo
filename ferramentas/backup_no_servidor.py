@@ -1,18 +1,24 @@
 """
-Cópia de segurança no SERVIDOR da empresa, rodada por este notebook (Agendador de Tarefas
-do Windows: ao entrar no Windows e duas vezes por dia).
+Cópia de segurança no SERVIDOR da empresa e no DRIVE, rodada por este notebook (Agendador
+de Tarefas do Windows: ao entrar no Windows e duas vezes por dia).
 
   1. lê a planilha e guarda a cópia numa pasta deste notebook (se algo mudou);
-  2. leva para a pasta do servidor tudo que ainda não está lá.
+  2. leva para a pasta do servidor tudo que ainda não está lá;
+  3. grava no Drive da empresa, se a cópia de lá estiver desatualizada. O robô da nuvem
+     também grava no Drive: são dois caminhos de propósito, para o Drive não depender só
+     do GitHub. Quem chega depois vê que a cópia já está lá e não duplica.
 
-As duas pastas ficam em backup.local.json, na raiz do projeto (fora do git, porque o
-código também vai para o repositório público da demonstração):
-  {"pasta_notebook": "...", "pasta_servidor": "..."}
+As pastas ficam em backup.local.json, na raiz do projeto (fora do git, porque o código
+também vai para o repositório público da demonstração):
+  {"pasta_notebook": "...", "pasta_servidor": "...", "chaves_drive": "..."}
+"chaves_drive" é opcional: caminho de um secrets.toml que tenha drive_oauth_client_id,
+drive_oauth_client_secret e drive_oauth_refresh_token (só é LIDO, na hora de rodar). Sem
+ele, e sem essas chaves no secrets deste projeto, o passo do Drive é pulado.
 
 Servidor fora do ar (notebook longe da empresa e sem Hamachi) não é erro: a cópia fica
 no notebook e é entregue na próxima vez. Só aparece um aviso na tela se passarem
-DIAS_SEM_AVISAR dias sem conseguir ler a planilha ou sem conseguir entregar ao servidor,
-ou se a planilha encolher.
+DIAS_SEM_AVISAR dias sem conseguir ler a planilha, entregar ao servidor ou gravar no
+Drive, ou se a planilha encolher.
 
 Rodar na mão:  py ferramentas\\backup_no_servidor.py          (mostra o que fez)
 """
@@ -74,6 +80,19 @@ def _dias_desde(iso: str, agora: datetime) -> float:
     return (agora - datetime.fromisoformat(iso)).total_seconds() / 86400
 
 
+def _chaves_drive(secrets: dict) -> dict | None:
+    """Autorização do Drive: do secrets deste projeto ou do arquivo apontado em "chaves_drive"."""
+    campos = ("client_id", "client_secret", "refresh_token")
+    fontes = [secrets]
+    if _CONFIG.get("chaves_drive"):
+        with open(_CONFIG["chaves_drive"], "rb") as f:
+            fontes.append(tomllib.load(f))
+    for fonte in fontes:
+        if all(fonte.get("drive_oauth_" + c) for c in campos):
+            return {c: fonte["drive_oauth_" + c] for c in campos}
+    return None
+
+
 def main() -> int:
     agora = backup.agora_sp()
     PASTA_LOCAL.mkdir(parents=True, exist_ok=True)
@@ -112,8 +131,23 @@ def main() -> int:
     except Exception as e:
         falas.append(f"Servidor: não entregue agora ({e}); fica guardado no notebook")
 
+    # Drive: segundo caminho, além do robô da nuvem. Falhar aqui não é erro da rodada.
+    conferir = [("leitura_ok", "ler a planilha"), ("servidor_ok", "entregar a cópia ao servidor")]
+    try:
+        chaves = _chaves_drive(secrets)
+        if chaves is None:
+            falas.append("Drive: sem autorização neste notebook, pulando")
+        else:
+            conferir.append(("drive_ok", "gravar a cópia no Drive"))
+            if leu and not erros:
+                nome, gravou = backup.enviar_drive(copia, backup.servico_drive(chaves))
+                falas.append(f"Drive: {'cópia nova ' + nome if gravou else 'sem mudança desde ' + nome}")
+                estado["drive_ok"] = agora.isoformat(timespec="seconds")
+    except Exception as e:
+        falas.append(f"Drive: não gravado agora ({type(e).__name__}: {e}); a nuvem cobre")
+
     avisar = [e for e in erros if "encolheu" in e]
-    for chave, rotulo in (("leitura_ok", "ler a planilha"), ("servidor_ok", "entregar a cópia ao servidor")):
+    for chave, rotulo in conferir:
         dias = _dias_desde(estado.get(chave) or estado["desde"], agora)
         if dias >= DIAS_SEM_AVISAR:
             avisar.append(f"Faz {int(dias)} dias que o backup não consegue {rotulo}.")
