@@ -42,7 +42,7 @@ def _recarregar_modulos_alterados():
 _recarregar_modulos_alterados()
 
 from dados import (Local, Planilha, drive_configurado, enviar_comprovante, excluir_cobranca,
-                   restaurar_cobranca)
+                   receber_em_duas_formas, restaurar_cobranca)
 from demo import banco_demo
 import avisos_telegram
 import feriados
@@ -51,6 +51,7 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
                     MAX_VEZES_CARTAO, cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     texto_vezes,
+                    FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
@@ -76,6 +77,12 @@ SVG_PIX = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-wi
 SVG_CARTAO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
               'stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" '
               'height="14" rx="2.5"/><path d="M2.5 10h19M6.5 15h4"/></svg>')
+# Híbrido = os dois juntos: os quadradinhos do Pix em cima e o cartão embaixo
+SVG_HIBRIDO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+               'stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" '
+               'height="4.5" rx=".8"/><rect x="10" y="2.5" width="4.5" height="4.5" rx=".8"/>'
+               '<rect x="2.5" y="10" width="4.5" height="4.5" rx=".8"/><rect x="9.5" y="11.5" '
+               'width="12" height="9.5" rx="2"/><path d="M9.5 15.2h12"/></svg>')
 SVG_SETA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
             'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>')
 
@@ -333,7 +340,7 @@ def tela_inicio():
     )
 
     if _cartao_inicio("hm_nova", "tq_nova", "Cadastrar nova cobrança", "claro", SVG_MAIS,
-                      "Nova cobrança", "Pix ou cartão"):
+                      "Nova cobrança", "Pix, cartão ou híbrido"):
         _ir("nova")
 
     chips = ""
@@ -697,6 +704,10 @@ def tela_nova():
                       "Cobrança cartão", f"Até {MAX_DATAS_CARTAO} datas para passar o cartão"):
         _limpar_campos("ct_")
         _ir("cartao")
+    if _cartao_inicio("hm_hibrido", "tq_hibrido", "Cobrança híbrida", "claro", SVG_HIBRIDO,
+                      "Cobrança híbrida", "Uma parte no Pix, outra no cartão"):
+        _limpar_campos("hb_")
+        _ir("hibrido")
 
 
 def _bloco_cliente(prefixo: str):
@@ -767,6 +778,131 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
     _ir("cobranca")
 
 
+# ── Blocos do Pix e do cartão (as telas Pix, Cartão e Híbrida usam os mesmos) ──
+# O `prefixo` separa as chaves dos campos: "px_" e "ct_" nas telas de uma forma só,
+# "hb_px_" e "hb_ct_" na híbrida.
+
+def _bloco_parcelas_pix(prefixo: str, restante: float, total, primeira_padrao: date, erros: list):
+    """Quantas parcelas, o valor e o vencimento de cada uma (Contínuo ou Parcial).
+    Devolve (valores, datas) e acrescenta em `erros` o que estiver faltando."""
+    valores, datas = [], []
+    n = st.number_input("Número de parcelas", min_value=1, max_value=60, value=None, step=1,
+                        key=f"{prefixo}n", placeholder="Ex.: 10")
+    modo_valor = st.radio("Valor das parcelas", ["Contínuo", "Parcial"], horizontal=True,
+                          key=f"{prefixo}mv", captions=["igual todo mês", "muda por mês"])
+    modo_data = st.radio("Vencimento", ["Contínuo", "Parcial"], horizontal=True,
+                         key=f"{prefixo}md", captions=["mesmo dia todo mês", "escolher cada data"])
+    primeira = st.date_input("1º vencimento", value=primeira_padrao,
+                             format="DD/MM/YYYY", key=f"{prefixo}primeira")
+    if not n:
+        erros.append("Falta o número de parcelas.")
+        return valores, datas
+
+    n = int(n)
+    if modo_valor == "Contínuo":
+        sugestao = restante / n if restante else 0
+        vp, ok_v = _valor("Valor de cada parcela", f"{prefixo}vparc",
+                          placeholder=f"{sugestao:.2f}".replace(".", ",") if sugestao else "0,00",
+                          help="Em branco = divide o que falta igual entre as parcelas.")
+        if not ok_v:
+            erros.append("Tem valor digitado errado.")
+        valores = [vp] * n if vp is not None else resolver_valores(restante, [None] * n)
+    base = datas_continuas(primeira, n) if primeira else [None] * n
+
+    if modo_valor == "Parcial" or modo_data == "Parcial":
+        st.markdown("<div class='px-lista'>Parcela por parcela</div>", unsafe_allow_html=True)
+        digitados = []
+        for k in range(n):
+            with st.container(key=f"{prefixo}linha_{k}"):
+                cols = st.columns(2) if modo_valor == "Parcial" and modo_data == "Parcial" else [st.container()]
+                if modo_valor == "Parcial":
+                    with cols[0]:
+                        v, ok_v = _valor(f"Valor da {k + 1}ª", f"{prefixo}v{k}_{n}",
+                                         placeholder="em branco = divide")
+                        if not ok_v:
+                            erros.append("Tem valor digitado errado.")
+                        digitados.append(v)
+                if modo_data == "Parcial":
+                    with cols[-1]:
+                        # A chave leva o 1º vencimento: trocar ele recalcula as datas sugeridas
+                        datas.append(st.date_input(
+                            f"Vencimento da {k + 1}ª", value=base[k], format="DD/MM/YYYY",
+                            key=f"{prefixo}d{k}_{n}_{primeira}"))
+        if modo_valor == "Parcial":
+            valores = resolver_valores(restante, digitados)
+    if modo_data == "Contínuo":
+        datas = base
+
+    if any(d is None for d in datas):
+        erros.append("Falta alguma data de vencimento.")
+    if total and any(v <= 0 for v in valores):
+        erros.append("Tem parcela com valor zero ou negativo.")
+    return valores, datas
+
+
+def _resumo_pix(entrada: float, data_entrada, valores: list, datas: list, hoje: date,
+                com_fim: bool = True) -> list:
+    """Linhas do resumo do Pix: a entrada, as parcelas e (com `com_fim`) até quando vai."""
+    linhas = []
+    if entrada > 0 and data_entrada:
+        paga = "paga" if data_entrada <= hoje else "a receber"
+        linhas.append(f"Entrada de <b>{formatar_brl(entrada)}</b> em {data_br(data_entrada)} ({paga})")
+    if valores and datas and all(datas):
+        iguais = len(set(round(v, 2) for v in valores)) == 1
+        parc = (f"<b>{len(valores)}x de {formatar_brl(valores[0])}</b>" if iguais
+                else f"<b>{len(valores)} parcelas</b> somando {formatar_brl(sum(valores))}")
+        linhas.append(f"{parc}, de {data_br(min(datas))} a {data_br(max(datas))}")
+        if com_fim:
+            linhas.append(f"A cobrança vai até <b>{nome_mes(max(datas))}</b>")
+        if sorted(datas) != datas:
+            linhas.append(":warning: As datas não estão em ordem")
+    return linhas
+
+
+def _bloco_passadas_cartao(prefixo: str, a_cobrar: float, total, erros: list, hoje: date | None = None):
+    """
+    Quantas vezes o cartão passa e, em cada uma, a data, o valor e em quantas parcelas.
+    Devolve (valores, datas, vezes, ja_passou). Com `hoje` (só a tela híbrida manda), a
+    passada com data de hoje ou anterior ganha a caixa "Já passou", que vem marcada.
+    """
+    valores, datas, vezes, ja_passou = [], [], [], []
+    n = st.number_input("Quantas vezes você vai passar o cartão?", min_value=1, max_value=MAX_DATAS_CARTAO,
+                        value=None, step=1, key=f"{prefixo}n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}",
+                        help="Cada vez é um dia em que você passa o cartão do cliente. "
+                             "Em cada uma você diz o valor e em quantas parcelas ela foi dividida.")
+    if not n:
+        erros.append("Falta dizer quantas vezes vai passar o cartão.")
+        return valores, datas, vezes, ja_passou
+
+    n = int(n)
+    digitados = []
+    for k in range(n):
+        with st.container(key=f"{prefixo}linha_{k}"):
+            c1, c2 = st.columns(2)
+            with c1:
+                datas.append(st.date_input(f"Data {k + 1}", value=None, format="DD/MM/YYYY",
+                                           key=f"{prefixo}d{k}"))
+            with c2:
+                v, ok_v = _valor(f"Valor {k + 1}", f"{prefixo}v{k}", placeholder="em branco = divide")
+                if not ok_v:
+                    erros.append("Tem valor digitado errado.")
+                digitados.append(v)
+            vezes.append(int(st.number_input(
+                f"Parcelado em quantas vezes ({k + 1}ª passada)", min_value=1, max_value=MAX_VEZES_CARTAO,
+                value=1, step=1, key=f"{prefixo}x{k}",
+                help="Em quantas parcelas essa passada é dividida no cartão. 1 = à vista.")))
+            ja_passou.append(bool(
+                hoje and datas[-1] and datas[-1] <= hoje
+                and st.checkbox(f"Já passou o cartão ({k + 1}ª passada)", value=True, key=f"{prefixo}ok{k}",
+                                help="Marcado = entra como já recebido. Desmarque se ainda vai passar.")))
+    valores = resolver_valores(a_cobrar, digitados)
+    if any(d is None for d in datas):
+        erros.append("Falta escolher alguma data.")
+    if total and any(v <= 0 for v in valores):
+        erros.append("Tem data com valor zero ou negativo.")
+    return valores, datas, vezes, ja_passou
+
+
 # ── Cobrança Pix ──────────────────────────────────────────────────────────────
 
 def tela_pix():
@@ -793,77 +929,15 @@ def tela_pix():
             erros.append("A entrada é maior que o valor total.")
 
     restante = max((total or 0) - entrada, 0)
-    valores, datas = [], []
     with st.container(key="sec_px3"):
         _titulo_secao(3, "Parcelas")
-        n = st.number_input("Número de parcelas", min_value=1, max_value=60, value=None, step=1,
-                            key="px_n", placeholder="Ex.: 10")
-        modo_valor = st.radio("Valor das parcelas", ["Contínuo", "Parcial"], horizontal=True,
-                              key="px_mv", captions=["igual todo mês", "muda por mês"])
-        modo_data = st.radio("Vencimento", ["Contínuo", "Parcial"], horizontal=True,
-                             key="px_md", captions=["mesmo dia todo mês", "escolher cada data"])
-        primeira = st.date_input("1º vencimento", value=mes_mais(data_entrada or hoje, 1),
-                                 format="DD/MM/YYYY", key="px_primeira")
-
-        if n:
-            n = int(n)
-            if modo_valor == "Contínuo":
-                sugestao = restante / n if restante else 0
-                vp, ok_v = _valor("Valor de cada parcela", "px_vparc",
-                                  placeholder=f"{sugestao:.2f}".replace(".", ",") if sugestao else "0,00",
-                                  help="Em branco = divide o que falta igual entre as parcelas.")
-                if not ok_v:
-                    erros.append("Tem valor digitado errado.")
-                valores = [vp] * n if vp is not None else resolver_valores(restante, [None] * n)
-            base = datas_continuas(primeira, n) if primeira else [None] * n
-
-            if modo_valor == "Parcial" or modo_data == "Parcial":
-                st.markdown("<div class='px-lista'>Parcela por parcela</div>", unsafe_allow_html=True)
-                digitados = []
-                for k in range(n):
-                    with st.container(key=f"px_linha_{k}"):
-                        cols = st.columns(2) if modo_valor == "Parcial" and modo_data == "Parcial" else [st.container()]
-                        if modo_valor == "Parcial":
-                            with cols[0]:
-                                v, ok_v = _valor(f"Valor da {k + 1}ª", f"px_v{k}_{n}",
-                                                 placeholder="em branco = divide")
-                                if not ok_v:
-                                    erros.append("Tem valor digitado errado.")
-                                digitados.append(v)
-                        if modo_data == "Parcial":
-                            with cols[-1]:
-                                # A chave leva o 1º vencimento: trocar ele recalcula as datas sugeridas
-                                datas.append(st.date_input(
-                                    f"Vencimento da {k + 1}ª", value=base[k], format="DD/MM/YYYY",
-                                    key=f"px_d{k}_{n}_{primeira}"))
-                if modo_valor == "Parcial":
-                    valores = resolver_valores(restante, digitados)
-            if modo_data == "Contínuo":
-                datas = base
-
-            if any(d is None for d in datas):
-                erros.append("Falta alguma data de vencimento.")
-            if total and any(v <= 0 for v in valores):
-                erros.append("Tem parcela com valor zero ou negativo.")
-        else:
-            erros.append("Falta o número de parcelas.")
+        valores, datas = _bloco_parcelas_pix("px_", restante, total, mes_mais(data_entrada or hoje, 1), erros)
 
     # ── Resumo calculado ──
     confirmado = True
     with st.container(key="sec_px4"):
         _titulo_secao(4, "Resumo")
-        linhas = []
-        if entrada > 0 and data_entrada:
-            paga = "paga" if data_entrada <= hoje else "a receber"
-            linhas.append(f"Entrada de <b>{formatar_brl(entrada)}</b> em {data_br(data_entrada)} ({paga})")
-        if valores and datas and all(datas):
-            iguais = len(set(round(v, 2) for v in valores)) == 1
-            parc = (f"<b>{len(valores)}x de {formatar_brl(valores[0])}</b>" if iguais
-                    else f"<b>{len(valores)} parcelas</b> somando {formatar_brl(sum(valores))}")
-            linhas.append(f"{parc}, de {data_br(min(datas))} a {data_br(max(datas))}")
-            linhas.append(f"A cobrança vai até <b>{nome_mes(max(datas))}</b>")
-            if sorted(datas) != datas:
-                linhas.append(":warning: As datas não estão em ordem")
+        linhas = _resumo_pix(entrada, data_entrada, valores, datas, hoje)
         if linhas:
             _info("<br>".join(linhas))
             if valores:
@@ -909,40 +983,10 @@ def tela_cartao():
         if total:
             _info(f"Valor a cobrar: <b>{formatar_brl(a_cobrar)}</b>")
 
-    valores, datas = [], []
     with st.container(key="sec_ct3"):
         _titulo_secao(3, "Datas para passar o cartão")
         st.caption("Para quando o cliente não tem limite para passar tudo de uma vez.")
-        n = st.number_input("Quantas vezes você vai passar o cartão?", min_value=1, max_value=MAX_DATAS_CARTAO,
-                            value=None, step=1, key="ct_n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}",
-                            help="Cada vez é um dia em que você passa o cartão do cliente. "
-                                 "Em cada uma você diz o valor e em quantas parcelas ela foi dividida.")
-        vezes = []
-        if n:
-            n = int(n)
-            digitados = []
-            for k in range(n):
-                with st.container(key=f"ct_linha_{k}"):
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        datas.append(st.date_input(f"Data {k + 1}", value=None, format="DD/MM/YYYY",
-                                                   key=f"ct_d{k}"))
-                    with c2:
-                        v, ok_v = _valor(f"Valor {k + 1}", f"ct_v{k}", placeholder="em branco = divide")
-                        if not ok_v:
-                            erros.append("Tem valor digitado errado.")
-                        digitados.append(v)
-                    vezes.append(int(st.number_input(
-                        f"Parcelado em quantas vezes ({k + 1}ª passada)", min_value=1, max_value=MAX_VEZES_CARTAO,
-                        value=1, step=1, key=f"ct_x{k}",
-                        help="Em quantas parcelas essa passada é dividida no cartão. 1 = à vista.")))
-            valores = resolver_valores(a_cobrar, digitados)
-            if any(d is None for d in datas):
-                erros.append("Falta escolher alguma data.")
-            if total and any(v <= 0 for v in valores):
-                erros.append("Tem data com valor zero ou negativo.")
-        else:
-            erros.append("Falta dizer quantas vezes vai passar o cartão.")
+        valores, datas, vezes, _ = _bloco_passadas_cartao("ct_", a_cobrar, total, erros)
 
     confirmado = True
     with st.container(key="sec_ct4"):
@@ -972,15 +1016,118 @@ def tela_cartao():
                                     [x for _, _, x in ordem]), "ct_", obs_ct)
 
 
+# ── Cobrança híbrida (uma parte no Pix, outra no cartão) ──────────────────────
+
+def tela_hibrido():
+    hoje = _hoje()
+    _cabecalho("Cobrança híbrida", voltar_para="nova", subtitulo="Uma parte no Pix e outra no cartão")
+    with st.container(key="sec_hb1"):
+        cliente, turma, treino, erros = _bloco_cliente("hb_")
+
+    parte_pix = parte_cartao = 0.0
+    with st.container(key="sec_hb2"):
+        _titulo_secao(2, "Valores")
+        total, ok_t = _valor("Valor total", "hb_total")
+        ajuda = "Preencha um dos dois: o outro é o que sobra do total."
+        v_pix, ok_x = _valor("Quanto vai no Pix", "hb_v_pix", placeholder="em branco = o resto", help=ajuda)
+        v_cartao, ok_c = _valor("Quanto vai no cartão", "hb_v_cartao", placeholder="em branco = o resto",
+                                help=ajuda)
+        if not (ok_t and ok_x and ok_c):
+            erros.append("Tem valor digitado errado.")
+        if total is None or total <= 0:
+            erros.append("Falta o valor total.")
+        elif v_pix is None and v_cartao is None:
+            erros.append("Falta dizer quanto vai no Pix ou quanto vai no cartão.")
+        else:
+            if v_pix is None:
+                v_pix = (centavos(total) - centavos(v_cartao)) / 100
+            elif v_cartao is None:
+                v_cartao = (centavos(total) - centavos(v_pix)) / 100
+            if v_pix <= 0 or v_cartao <= 0:
+                erros.append("O Pix e o cartão precisam ter valor, e nenhum pode passar do total. "
+                             "Se é tudo de um jeito só, use a cobrança Pix ou a cobrança cartão.")
+                _erro_campo("O Pix e o cartão precisam ter valor, e nenhum pode passar do total.")
+            else:
+                parte_pix, parte_cartao = v_pix, v_cartao
+                _info(f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(v_pix)}</b> &nbsp;+&nbsp; "
+                      f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(v_cartao)}</b>")
+
+    data_entrada, valores_px, datas_px = None, [], []
+    with st.container(key="sec_hb3"):
+        _titulo_secao(3, "Parte no Pix")
+        entrada, ok_e = _valor("Valor de entrada", "hb_entrada", placeholder="0,00 se não teve entrada",
+                               help="O que entra primeiro no Pix. Se o Pix foi pago de uma vez só, "
+                                    "coloque aqui a parte inteira do Pix.")
+        entrada = entrada or 0.0
+        if entrada > 0:
+            data_entrada = st.date_input("Data da entrada", value=hoje, format="DD/MM/YYYY",
+                                         key="hb_dt_entrada",
+                                         help="O dia em que a pessoa pagou a entrada.")
+        if not ok_e:
+            erros.append("Tem valor digitado errado.")
+        if parte_pix and centavos(entrada) > centavos(parte_pix):
+            erros.append("A entrada é maior que a parte do Pix.")
+        if parte_pix and centavos(entrada) == centavos(parte_pix):
+            _info("O Pix fica todo na entrada, sem parcelas.")
+        else:
+            valores_px, datas_px = _bloco_parcelas_pix("hb_px_", max(parte_pix - entrada, 0), total,
+                                                       mes_mais(data_entrada or hoje, 1), erros)
+
+    with st.container(key="sec_hb4"):
+        _titulo_secao(4, "Parte no cartão")
+        st.caption("Uma data para cada vez que o cartão passa. Se já passou, coloque o dia em que passou.")
+        valores_ct, datas_ct, vezes, passou = _bloco_passadas_cartao("hb_ct_", parte_cartao, total, erros,
+                                                                    hoje=hoje)
+
+    confirmado = True
+    with st.container(key="sec_hb5"):
+        _titulo_secao(5, "Resumo")
+        linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False)
+        if linhas_px and valores_ct and all(datas_ct):
+            linhas = [f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(entrada + sum(valores_px))}</b>"] + linhas_px
+            linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(sum(valores_ct))}</b>")
+            for d, v, x, ok in sorted(zip(datas_ct, valores_ct, vezes, passou)):
+                linhas.append(f"{data_br(d)} · {formatar_brl(v)} · {texto_vezes(v, x)}"
+                              + (" · <b>já passou</b>" if ok else ""))
+            fim = max([d for d in datas_px if d] + datas_ct + ([data_entrada] if data_entrada else []))
+            linhas.append(f"A cobrança vai até <b>{nome_mes(fim)}</b>")
+            _info("<br>".join(linhas))
+            confirmado = _bloco_conferencia(total, [entrada] + valores_px + valores_ct, "hb_")
+            _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
+                  "e todo dia enquanto estiver atrasado.", "cx-nota")
+        else:
+            st.caption("Preencha a parte do Pix e a parte do cartão para ver o resumo.")
+
+    obs_hb = st.text_input("Observação (opcional)", key="hb_obs", max_chars=300,
+                           placeholder="Ex.: cartão do marido")
+    if st.button("Salvar cobrança", type="primary", key="hb_salvar", use_container_width=True,
+                 icon=":material/check:"):
+        if not confirmado:
+            erros.append("O valor não fecha com o total: confira ou marque a caixa acima.")
+        if erros:
+            st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
+        else:
+            ordem = sorted(zip(datas_ct, valores_ct, vezes, passou))
+            _salvar(TIPO_HIBRIDO, cliente, turma, treino, total,
+                    parcelas_hibrido(entrada, data_entrada, valores_px, datas_px,
+                                     [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
+                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje),
+                    "hb_", obs_hb)
+
+
 # ── Relatório ─────────────────────────────────────────────────────────────────
 
 def _chip_sit(sit: str) -> str:
     return f"<span class='sit {COR_CLI[sit]}'>{ROTULO_CLI[sit]}</span>"
 
 
+_CLASSE_TIPO = {TIPO_PIX: "tp-pix", TIPO_CARTAO: "tp-cartao", TIPO_HIBRIDO: "tp-hib"}
+
+
 def _chip_tipo(tipo: str) -> str:
-    """Etiqueta da forma de pagamento: Pix azul, Cartão rosa (para bater o olho e diferenciar)."""
-    return f"<span class='tp {'tp-cartao' if tipo == TIPO_CARTAO else 'tp-pix'}'>{_e(tipo)}</span>"
+    """Etiqueta da forma de pagamento: Pix azul, Cartão rosa (para bater o olho e diferenciar);
+    Híbrido é metade de cada cor."""
+    return f"<span class='tp {_CLASSE_TIPO.get(tipo, 'tp-pix')}'>{_e(tipo)}</span>"
 
 
 def _linha_estado(c: dict, hoje: date) -> str:
@@ -995,7 +1142,9 @@ def _linha_estado(c: dict, hoje: date) -> str:
     if p:
         apelido = (" (hoje)" if p["vencimento"] == hoje
                    else " (amanhã)" if p["vencimento"] == hoje + timedelta(days=1) else "")
-        return f"Próxima: <b>{data_br(p['vencimento'])}</b>{apelido} · {formatar_brl(p['valor'])}"
+        # na híbrida, diz de que forma é a próxima (umas são Pix, outras cartão)
+        forma = f" · no {'cartão' if p['tipo'] == TIPO_CARTAO else 'Pix'}" if c["hibrida"] else ""
+        return f"Próxima: <b>{data_br(p['vencimento'])}</b>{apelido} · {formatar_brl(p['valor'])}{forma}"
     return ""
 
 
@@ -1077,7 +1226,7 @@ def tela_relatorio():
 
     with st.expander("Filtros", icon=":material/tune:"):
         sits = st.pills("Situação", list(SITUACOES_FILTRO), selection_mode="multi", key="rf_sit")
-        tipos = st.pills("Forma", [TIPO_PIX, TIPO_CARTAO], selection_mode="multi", key="rf_tipo")
+        tipos = st.pills("Forma", [TIPO_PIX, TIPO_CARTAO, TIPO_HIBRIDO], selection_mode="multi", key="rf_tipo")
         treinos = st.pills("Treinamento", list(TREINAMENTOS.values()), selection_mode="multi", key="rf_trein")
         turma = st.text_input("Turma", key="rf_turma", placeholder="Ex.: L345")
         if turma.strip() and not normalizar_turma(turma):
@@ -1150,6 +1299,7 @@ def _visao_agenda(cobs: list, hoje: date):
 def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     d = p["vencimento"]
     cor = COR_PARC[p["situacao"]]
+    cartao = p["tipo"] == TIPO_CARTAO   # a forma é a DESTA parcela (na híbrida elas se misturam)
     if d:
         bloco = (f"<div class='pc-data'><span class='pc-mes'>{MESES_ABREV[d.month - 1]} {d.year}</span>"
                  f"<span class='pc-dia'>{d.day}</span><span class='pc-sem'>{DIAS_SEMANA[d.weekday()]}</span></div>")
@@ -1158,7 +1308,7 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     if p["paga"]:
         sit = ""
         pago_em = f"<small>{p['pago_em'].strftime('%d/%m/%y')}</small>" if p["pago_em"] else ""
-        carimbo = f"<div class='pc-carimbo'>{'PASSOU' if c['tipo'] == TIPO_CARTAO else 'PAGO'}{pago_em}</div>"
+        carimbo = f"<div class='pc-carimbo'>{'PASSOU' if cartao else 'PAGO'}{pago_em}</div>"
     else:
         carimbo = ""
         if p["situacao"] == SIT_ATRASADA:
@@ -1174,15 +1324,17 @@ def _html_parcela(p: dict, c: dict, hoje: date, mostrar_cliente: bool) -> str:
     nome = f"<div class='pc-nome'>{_e(c['cliente'])}</div>" if mostrar_cliente else ""
     quem = ""
     if p["paga"] and p["marcado_por"]:
-        verbo = "passou" if c["tipo"] == TIPO_CARTAO else "recebeu"
+        verbo = "passou" if cartao else "recebeu"
         quem = f"<br><span class='pc-quem'>{_e(p['marcado_por'])} {verbo}</span>"
     obs = f"<div class='pc-obs'>{_e(p['observacao'])}</div>" if p["observacao"] else ""
-    if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+    if cartao and p["n"] > 0:
         quem = f" · {texto_vezes(p['valor'], p['vezes'])}" + quem
+    # Na agenda a etiqueta diz a forma; na ficha só precisa quando a cobrança é híbrida
+    etiqueta = _chip_tipo(p["tipo"]) if mostrar_cliente or c["hibrida"] else ""
     return (
         f"<div class='pc {cor}{' pago' if p['paga'] else ''}'>{bloco}<div class='pc-corpo'>"
         f"<div class='pc-topo'><span class='pc-tag'>{topo}</span>"
-        f"{_chip_tipo(c['tipo']) if mostrar_cliente else ''}{sit}</div>{nome}"
+        f"{etiqueta}{sit}</div>{nome}"
         f"<div class='pc-rot'>{_e(p['rotulo'])}{quem}</div>"
         f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div>{obs}</div>{carimbo}</div>"
     )
@@ -1198,7 +1350,7 @@ def _parcela_ui(p: dict, c: dict, hoje: date, contexto: str, mostrar_cliente: bo
                 _dlg_ver(c["id"], p["n"])
             return
         botoes = st.columns(3 if mostrar_cliente else 2)
-        rot_receber = "Passou" if c["tipo"] == TIPO_CARTAO else "Recebi"
+        rot_receber = "Passou" if p["tipo"] == TIPO_CARTAO else "Recebi"
         with botoes[0]:
             if st.button(rot_receber, key=f"rec_{chave}", icon=":material/check_circle:",
                          use_container_width=True):
@@ -1231,14 +1383,34 @@ def _dlg_receber(cid: str, n: int):
         return
     _cab_dialogo(c, p)
     k = f"_rc_{cid}_{n}"   # chave com o ID: fechar no X não pode vazar campo para outra parcela
-    quando = st.date_input("Recebido em" if c["tipo"] == TIPO_PIX else "Passou em", value=_hoje(),
+    cartao = p["tipo"] == TIPO_CARTAO   # a forma é a desta parcela
+    quando = st.date_input("Passou em" if cartao else "Recebido em", value=_hoje(),
                            format="DD/MM/YYYY", key=f"{k}_data")
     vezes = p["vezes"]
-    if c["tipo"] == TIPO_CARTAO:
+    if cartao:
         vezes = int(st.number_input("Passou em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
                                     value=p["vezes"], step=1, key=f"{k}_vezes"))
-        # HTML, não st.caption: dois "R$" na mesma linha viram fórmula ($...$) no markdown do Streamlit
-        _info(f"{formatar_brl(p['valor'])} · <b>{texto_vezes(p['valor'], vezes)}</b>")
+        if not st.session_state.get(f"{k}_hib"):
+            # HTML, não st.caption: dois "R$" na mesma linha viram fórmula ($...$) no markdown do Streamlit
+            _info(f"{formatar_brl(p['valor'])} · <b>{texto_vezes(p['valor'], vezes)}</b>")
+
+    # Pagamento híbrido desta parcela: uma parte veio na outra forma
+    outra = "Pix" if cartao else "cartão"
+    v_outra, divisao_ok = None, True
+    dividir = st.toggle(f"Pagamento híbrido: uma parte foi no {outra}", key=f"{k}_hib")
+    if dividir:
+        v_outra, ok_o = _valor(f"Quanto foi no {outra}", f"{k}_outra")
+        if not cartao:
+            vezes = int(st.number_input("No cartão, em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+                                        value=1, step=1, key=f"{k}_hvezes"))
+        divisao_ok = bool(ok_o and v_outra and 0 < centavos(v_outra) < centavos(p["valor"]))
+        if divisao_ok:
+            fica = p["valor"] - v_outra
+            no_pix, no_cartao = (v_outra, fica) if cartao else (fica, v_outra)
+            _info(f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(no_pix)}</b> &nbsp;+&nbsp; {_chip_tipo(TIPO_CARTAO)} "
+                  f"<b>{formatar_brl(no_cartao)}</b> ({texto_vezes(no_cartao, vezes)})")
+        elif ok_o and v_outra is not None:
+            _erro_campo(f"Tem que ser maior que zero e menor que {formatar_brl(p['valor'])}.")
     obs = st.text_input("Observação (opcional)", value=p["observacao"], key=f"{k}_obs", max_chars=200,
                         placeholder="Ex.: pago em permuta")
     arquivo = None
@@ -1248,6 +1420,9 @@ def _dlg_receber(cid: str, n: int):
                                    key=f"{k}_arq")
     if st.button("Confirmar", type="primary", key=f"{k}_ok", use_container_width=True,
                  icon=":material/check:"):
+        if dividir and not divisao_ok:
+            st.error(f"Diga quanto foi no {outra}: maior que zero e menor que {formatar_brl(p['valor'])}.")
+            return
         link = ""
         if arquivo is not None:
             try:
@@ -1258,11 +1433,16 @@ def _dlg_receber(cid: str, n: int):
                 st.error(f"O comprovante não subiu ({e}). Nada foi marcado; tente de novo "
                          "ou confirme sem o comprovante.")
                 return
+        pagamento = {"Pago em": quando, "Comprovante": link, "Marcado por": _usuario(),
+                     "Observação": obs.strip()}
         try:
-            ok = _banco().atualizar_parcela(cid, n, {"Status": STATUS_PAGA, "Pago em": quando,
-                                                    "Comprovante": link, "Marcado por": _usuario(),
-                                                    "Observação": obs.strip(),
-                                                    **({"Vezes no cartão": vezes} if c["tipo"] == TIPO_CARTAO else {})})
+            if dividir:
+                da_parcela, nova = dividir_recebimento(p, v_outra, proximo_numero(c["parcelas"]), vezes,
+                                                       pagamento)
+                ok = receber_em_duas_formas(_banco(), cid, n, da_parcela, nova)
+            else:
+                ok = _banco().atualizar_parcela(cid, n, {"Status": STATUS_PAGA, **pagamento,
+                                                        **({"Vezes no cartão": vezes} if cartao else {})})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
@@ -1270,7 +1450,8 @@ def _dlg_receber(cid: str, n: int):
             st.error("Essa parcela não foi encontrada na planilha. Atualize a tela.")
             return
         _invalidar()
-        _flash(f"{p['rotulo']} de {c['cliente']} marcada como paga")
+        _flash(f"{p['rotulo']} de {c['cliente']} marcada como paga"
+               + (": parte no Pix, parte no cartão" if dividir else ""))
         st.rerun()
 
 
@@ -1339,8 +1520,11 @@ def _dlg_alterar(cid: str, n: int):
     nova_data = st.date_input("Data", value=p["vencimento"], format="DD/MM/YYYY", key=f"{k}_data")
     novo_valor, ok_v = _valor("Valor", f"{k}_valor", placeholder=f"{p['valor']:.2f}".replace(".", ","),
                               help="Em branco = continua o mesmo valor.")
+    # Trocar a forma de UMA parcela é o que torna a cobrança híbrida (ex.: essa vai ser no cartão)
+    forma = st.radio("Forma de pagamento", FORMAS, index=FORMAS.index(p["tipo"]), horizontal=True,
+                     key=f"{k}_forma")
     vezes = p["vezes"]
-    if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+    if forma == TIPO_CARTAO and p["n"] > 0:
         vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
                                     value=p["vezes"], step=1, key=f"{k}_vezes"))
     obs = st.text_input("Observação (opcional)", value=p["observacao"], key=f"{k}_obs", max_chars=200,
@@ -1350,7 +1534,9 @@ def _dlg_alterar(cid: str, n: int):
             st.error("Confira a data e o valor.")
             return
         campos = {"Vencimento": nova_data, "Observação": obs.strip()}
-        if c["tipo"] == TIPO_CARTAO and p["n"] > 0:
+        if forma != p["tipo"]:
+            campos["Forma"] = forma
+        if forma == TIPO_CARTAO and p["n"] > 0:
             campos["Vezes no cartão"] = vezes
         if novo_valor is not None:
             campos["Valor"] = novo_valor
@@ -1396,11 +1582,15 @@ def _dlg_adicionar(cid: str):
         return
     k = f"_ad_{cid}"
     ultima = c["ultima"] or _hoje()
-    data = st.date_input("Data", value=mes_mais(ultima, 1) if c["tipo"] == TIPO_PIX else None,
-                         format="DD/MM/YYYY", key=f"{k}_data")
+    # Vem na forma da cobrança; escolher a outra é o que torna a cobrança híbrida
+    padrao = c["tipo"] if c["tipo"] in FORMAS else TIPO_PIX
+    forma = st.radio("Forma de pagamento", FORMAS, index=FORMAS.index(padrao), horizontal=True,
+                     key=f"{k}_forma")
+    data = st.date_input("Data", value=mes_mais(ultima, 1) if forma == TIPO_PIX else None,
+                         format="DD/MM/YYYY", key=f"{k}_data" if forma == padrao else f"{k}_data_{forma}")
     valor, ok_v = _valor("Valor", f"{k}_valor")
     vezes = 1
-    if c["tipo"] == TIPO_CARTAO:
+    if forma == TIPO_CARTAO:
         vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
                                     value=1, step=1, key=f"{k}_vezes"))
     if st.button("Adicionar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/add:"):
@@ -1409,8 +1599,8 @@ def _dlg_adicionar(cid: str):
             return
         try:
             _banco().adicionar_parcela(cid, {"Nº": proximo_numero(c["parcelas"]), "Vencimento": data,
-                                             "Valor": valor,
-                                             **({"Vezes no cartão": vezes} if c["tipo"] == TIPO_CARTAO else {})})
+                                             "Valor": valor, "Forma": forma,
+                                             **({"Vezes no cartão": vezes} if forma == TIPO_CARTAO else {})})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
@@ -1529,13 +1719,20 @@ def tela_cobranca():
     if c["valor_total"] and abs(conferir_total(c["valor_total"], [total])) >= 0.005:
         aviso_total = (f"<div class='fc-aviso'>O total combinado é {formatar_brl(c['valor_total'])}, "
                        f"mas as parcelas somam {formatar_brl(total)}.</div>")
+    # Híbrida: quanto é de cada forma e quanto de cada uma já entrou
+    formas = ""
+    if c["hibrida"]:
+        formas = "<div class='fc-formas'>" + "".join(
+            f"<div>{_chip_tipo(f)}<span>{verbo} <b>{formatar_brl(c['por_forma'][f]['pago'])}</b> "
+            f"de {formatar_brl(c['por_forma'][f]['total'])}</span></div>"
+            for f, verbo in ((TIPO_PIX, "pago"), (TIPO_CARTAO, "passou"))) + "</div>"
     st.markdown(
         f"<div class='fc {COR_CLI[c['situacao']]}'><div class='fc-topo'>{selo}<span>{ate}</span></div>"
         f"<div class='pg'><i style='width:{pct}%'></i></div>"
         f"<div class='fc-nums'><div><b>{formatar_brl(c['pago'])}</b><span>Pago</span></div>"
         f"<div><b>{formatar_brl(c['falta'])}</b><span>Falta</span></div>"
         f"<div class='{'atr' if c['atrasado'] else ''}'><b>{formatar_brl(c['atrasado'])}</b><span>Atrasado</span></div>"
-        f"</div>{aviso_total}{quem}</div>",
+        f"</div>{formas}{aviso_total}{quem}</div>",
         unsafe_allow_html=True,
     )
     with st.container(key="fc_obs"):
@@ -1546,10 +1743,19 @@ def tela_cobranca():
                      icon=":material/edit_note:", use_container_width=True):
             _dlg_obs(c["id"])
 
-    for p in c["parcelas"]:
-        _parcela_ui(p, c, hoje, contexto="fc")
+    if c["hibrida"]:
+        # Um bloco para cada forma: primeiro tudo que é Pix, depois tudo que é cartão
+        for forma, titulo in ((TIPO_PIX, "No Pix"), (TIPO_CARTAO, "No cartão")):
+            st.markdown(f"<div class='fc-grupo'>{titulo}</div>", unsafe_allow_html=True)
+            for p in c["parcelas"]:
+                if p["tipo"] == forma:
+                    _parcela_ui(p, c, hoje, contexto="fc")
+    else:
+        for p in c["parcelas"]:
+            _parcela_ui(p, c, hoje, contexto="fc")
 
-    rot_add = "Adicionar data" if c["tipo"] == TIPO_CARTAO else "Adicionar parcela"
+    rot_add = {TIPO_CARTAO: "Adicionar data", TIPO_HIBRIDO: "Adicionar parcela ou data"}.get(
+        c["tipo"], "Adicionar parcela")
     if st.button(rot_add, key="fc_add", icon=":material/add:", use_container_width=True):
         _dlg_adicionar(c["id"])
     c1, c2 = st.columns(2)
@@ -1741,7 +1947,7 @@ def tela_feriados():
 # ── Voltar do celular ─────────────────────────────────────────────────────────
 
 # Para onde cada tela volta com a setinha do aparelho ("inicio" sai do app).
-_TELA_PAI = {"nova": "inicio", "pix": "nova", "cartao": "nova", "relatorio": "inicio",
+_TELA_PAI = {"nova": "inicio", "pix": "nova", "cartao": "nova", "hibrido": "nova", "relatorio": "inicio",
              "excluidas": "inicio", "notificacoes": "inicio", "feriados": "inicio", "config": "inicio",
              "cobranca": None}
 
@@ -1811,6 +2017,7 @@ telas = {
     "nova": tela_nova,
     "pix": tela_pix,
     "cartao": tela_cartao,
+    "hibrido": tela_hibrido,
     "relatorio": tela_relatorio,
     "cobranca": tela_cobranca,
     "excluidas": tela_excluidas,

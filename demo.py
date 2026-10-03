@@ -8,7 +8,7 @@ import tempfile
 from datetime import date, timedelta
 
 from dados import Local
-from nucleo import datas_continuas, parcelas_cartao, parcelas_pix
+from nucleo import datas_continuas, parcelas_cartao, parcelas_hibrido, parcelas_pix
 
 ARQUIVO_DEMO = os.path.join(tempfile.gettempdir(), "cobrancas_demo.local.json")
 
@@ -37,6 +37,11 @@ def semear(banco, hoje: date):
                                 "Treinamento": "LORAP", "Valor Total": 1200.0},
                                parcelas_pix(600, d(-60), [600.0], [d(-30)], hoje))
     banco.atualizar_parcela(cid, 1, {"Status": "Paga", "Pago em": d(-31)})
+    # Híbrida: metade no Pix (entrada + 2 parcelas) e metade no cartão (uma passada já feita)
+    banco.criar_cobranca({"Tipo": "Híbrido", "Cliente": "Juliana Martins (exemplo)", "Turma": "L346",
+                          "Treinamento": "LORAP", "Valor Total": 6000.0},
+                         parcelas_hibrido(1000, d(-8), [1000.0, 1000.0], datas_continuas(d(22), 2),
+                                          [1500.0, 1500.0], [d(-8), d(14)], [3, 3], [True, False], hoje))
 
 
 def banco_demo(hoje: date, recomecar: bool = False) -> Local:

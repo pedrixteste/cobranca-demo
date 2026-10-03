@@ -80,12 +80,17 @@ def _linha(p: dict, c: dict, hoje: date) -> str:
     atraso = (hoje - d).days
     if atraso > 0:
         quando += f" ({atraso} dia{'s' if atraso > 1 else ''} de atraso)"
-    forma = "Pix"
-    if c["tipo"] == nucleo.TIPO_CARTAO:
-        forma = "💳 passar cartão" + (f" em {p['vezes']}x" if p.get("vezes", 1) > 1 else "")
+    # A forma é a DA PARCELA: numa cobrança híbrida umas são Pix e outras cartão
+    rotulo = p["rotulo"].lower()
+    if p.get("tipo", c["tipo"]) == nucleo.TIPO_CARTAO:
+        forma = " · 💳 passar cartão" + (f" em {p['vezes']}x" if p.get("vezes", 1) > 1 else "")
+    else:
+        forma = "" if c.get("hibrida") else " · Pix"   # na híbrida o rótulo já diz "pix 2 de 3"
+    if c.get("hibrida"):
+        rotulo += " (híbrido)"
     onde = c["turma"] + (f" · {c['cidade']}" if c.get("cidade") else "")
     return (f"• <b>{_esc(c['cliente'])}</b> ({_esc(onde)}) · {nucleo.formatar_brl(p['valor'])}"
-            f" · {_esc(p['rotulo'].lower())} · {forma} · {quando}")
+            f" · {_esc(rotulo)}{forma} · {quando}")
 
 
 def _secao(titulo: str, itens: list, hoje: date) -> list:

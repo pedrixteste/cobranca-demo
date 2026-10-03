@@ -301,7 +301,8 @@ def _abas_de_leitura(wb, copia: dict, usados: set):
                ("Parcela", 18, None), ("Vencimento", 13, _DATA), ("Valor", 14, _REAIS), ("Situação", 16, None),
                ("Pago em", 13, _DATA), ("Quem recebeu", 16, None), ("Observação", 36, None),
                ("Comprovante", 40, None)]
-    linhas = [[c["cliente"], c["turma"], c["cidade"], c["tipo"], p["rotulo"], p["vencimento"], p["valor"],
+    # a forma é a de cada parcela (numa cobrança híbrida há linhas Pix e linhas Cartão)
+    linhas = [[c["cliente"], c["turma"], c["cidade"], p["tipo"], p["rotulo"], p["vencimento"], p["valor"],
                _ROTULO_PARCELA[p["situacao"]], p["pago_em"], p["marcado_por"], p["observacao"], p["comprovante"]]
               for c in ativas for p in c["parcelas"]]
     _tabela(parcelas, 1, colunas, linhas)

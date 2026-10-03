@@ -11,6 +11,13 @@ Modelo (duas abas na planilha):
               Cada parcela tem a própria data e o próprio valor, por isso
               "contínua" e "parcial" dão no mesmo modelo: a contínua só gera
               as linhas com valor e dia iguais.
+
+Pagamento híbrido (uma parte no Pix, outra no cartão): cada parcela tem a sua
+FORMA (coluna Forma: Pix ou Cartão). Em branco = a forma da cobrança, que é
+como estão todas as parcelas anteriores a essa coluna. A cobrança aparece como
+"Híbrido" quando tem parcela das duas formas: isso é CALCULADO pelas parcelas,
+então vale tanto para a cobrança que já nasce híbrida quanto para a que vira
+híbrida depois (uma parcela trocou de forma, ou foi recebida metade em cada).
 """
 from __future__ import annotations
 
@@ -24,9 +31,11 @@ from datetime import date, datetime, timedelta
 # A letra da turma define o treinamento (L345 = turma 345 do LORAP)
 TREINAMENTOS = {"L": "LORAP", "V": "Vendas", "I": "Impacto", "P": "Perfil"}
 
-TIPO_PIX    = "Pix"
-TIPO_CARTAO = "Cartão"
-TIPOS       = [TIPO_PIX, TIPO_CARTAO]
+TIPO_PIX     = "Pix"
+TIPO_CARTAO  = "Cartão"
+TIPO_HIBRIDO = "Híbrido"                  # parte no Pix, parte no cartão
+TIPOS        = [TIPO_PIX, TIPO_CARTAO, TIPO_HIBRIDO]
+FORMAS       = [TIPO_PIX, TIPO_CARTAO]    # forma de UMA parcela (nunca "Híbrido")
 
 STATUS_PAGA = "Paga"   # coluna Status da parcela; vazio = em aberto
 
@@ -52,7 +61,8 @@ SITUACAO_EXCLUIDA = "Excluída"
 COBRANCAS_HEADERS = ["ID", "Tipo", "Cliente", "Turma", "Treinamento", "Valor Total",
                      "Criada em", "Criada por", "Situação", "Excluída em", "Observações", "Cidade"]
 PARCELAS_HEADERS = ["ID Cobrança", "Nº", "Vencimento", "Valor", "Status", "Pago em",
-                    "Comprovante", "Marcado por", "Registrado em", "Observação", "Vezes no cartão"]
+                    "Comprovante", "Marcado por", "Registrado em", "Observação", "Vezes no cartão",
+                    "Forma"]
 
 MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
          "agosto", "setembro", "outubro", "novembro", "dezembro"]
@@ -258,6 +268,47 @@ def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
     return linhas
 
 
+def parcelas_hibrido(entrada: float, data_entrada: date | None, valores_pix: list[float],
+                     datas_pix: list[date], valores_cartao: list[float], datas_cartao: list[date],
+                     vezes: list[int] | None, ja_passou: list[bool] | None, hoje: date) -> list[dict]:
+    """
+    Linhas de uma cobrança híbrida nova: a parte do Pix (entrada Nº 0 + parcelas)
+    e, continuando a numeração, cada passada do cartão. Toda linha leva a Forma.
+    `ja_passou[k]` = aquela passada já foi feita: entra como paga na data dela
+    (igual à entrada do Pix, que entra paga quando a data já chegou).
+    """
+    linhas = [{**l, "Forma": TIPO_PIX}
+              for l in parcelas_pix(entrada, data_entrada, valores_pix, datas_pix, hoje)]
+    passou = list(ja_passou or []) + [False] * len(valores_cartao)
+    depois_do_pix = len(valores_pix)
+    for l, ok in zip(parcelas_cartao(0, hoje, valores_cartao, datas_cartao, vezes), passou):
+        if ok:
+            l = {**l, "Status": STATUS_PAGA, "Pago em": l["Vencimento"]}
+        linhas.append({**l, "Nº": depois_do_pix + l["Nº"], "Forma": TIPO_CARTAO})
+    return linhas
+
+
+def dividir_recebimento(p: dict, valor_outra: float, novo_n: int, vezes_cartao: int,
+                        pagamento: dict) -> tuple[dict, dict]:
+    """
+    Pagamento híbrido de UMA parcela: o cliente pagou uma parte na forma dela e
+    o resto na outra (Pix + cartão). A parcela fica só com a parte da forma dela
+    e nasce uma linha nova, já paga, com `valor_outra` na outra forma: a soma
+    das duas é o valor que a parcela tinha, então o total da cobrança não muda.
+
+    `pagamento` = o que vale para as duas (Pago em, Marcado por, Comprovante,
+    Observação). Devolve (campos a gravar na parcela, linha nova).
+    """
+    outra = TIPO_CARTAO if p["tipo"] == TIPO_PIX else TIPO_PIX
+    fica = (centavos(p["valor"]) - centavos(valor_outra)) / 100
+    comum = {**pagamento, "Status": STATUS_PAGA}
+    da_parcela = {**comum, "Valor": fica, "Forma": p["tipo"]}
+    nova = {**comum, "Nº": novo_n, "Vencimento": p["vencimento"], "Valor": float(valor_outra),
+            "Forma": outra}
+    (nova if outra == TIPO_CARTAO else da_parcela)["Vezes no cartão"] = max(int(vezes_cartao or 1), 1)
+    return da_parcela, nova
+
+
 def texto_vezes(valor: float, vezes: int) -> str:
     """'8x de R$ 1.000,00' ou 'à vista'."""
     return "à vista" if vezes <= 1 else f"{vezes}x de {formatar_brl(valor / vezes)}"
@@ -299,12 +350,27 @@ def situacao_parcela(p: dict, hoje: date) -> str:
     return SIT_ABERTA
 
 
-def rotulo_parcela(tipo: str, n: int, total: int) -> str:
+def rotulo_parcela(tipo: str, n: int, total: int, hibrida: bool = False) -> str:
+    """Na cobrança híbrida o nome diz a forma e a conta é por forma: 'Pix 2 de 3', 'Cartão 1 de 2'."""
+    if hibrida:
+        if n == 0:
+            return "Entrada no Pix" if tipo == TIPO_PIX else "Já pago no cartão"
+        return f"{tipo} {n} de {total}"
     if n == 0:
         return "Entrada" if tipo == TIPO_PIX else "Já pago antes"
     if tipo == TIPO_CARTAO:
         return f"Cartão {n} de {total}"
     return f"Parcela {n} de {total}"
+
+
+def forma_da_parcela(gravada, tipo_cobranca: str) -> str:
+    """Forma de UMA parcela: a que está na coluna Forma; em branco = a forma da cobrança."""
+    f = chave_busca(gravada)
+    if f == "pix":
+        return TIPO_PIX
+    if f == "cartao":
+        return TIPO_CARTAO
+    return TIPO_CARTAO if tipo_cobranca == TIPO_CARTAO else TIPO_PIX
 
 
 def _vezes(v) -> int:
@@ -329,8 +395,15 @@ def _parcela(linha: dict, tipo: str) -> dict:
         "marcado_por": _txt(linha.get("Marcado por")),
         "observacao": _txt(linha.get("Observação")),
         "vezes": _vezes(linha.get("Vezes no cartão")),
-        "tipo": tipo,
+        "tipo": forma_da_parcela(linha.get("Forma"), tipo),   # Pix ou Cartão, desta parcela
     }
+
+
+def _soma_da_forma(ps: list[dict], forma: str) -> dict:
+    dela = [p for p in ps if p["tipo"] == forma]
+    pago = sum(p["valor"] for p in dela if p["paga"])
+    falta = sum(p["valor"] for p in dela if not p["paga"])
+    return {"pago": pago, "falta": falta, "total": pago + falta, "n": len(dela)}
 
 
 def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
@@ -351,18 +424,28 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         excluida = _txt(c.get("Situação")) == SITUACAO_EXCLUIDA
         if excluida and not incluir_excluidas:
             continue
-        tipo = TIPO_CARTAO if _txt(c.get("Tipo")) == TIPO_CARTAO else TIPO_PIX
-        ps = sorted((_parcela(p, tipo) for p in por_id.get(cid, [])), key=lambda p: p["n"])
+        gravado = _txt(c.get("Tipo"))
+        gravado = gravado if gravado in TIPOS else TIPO_PIX
+        ps = sorted((_parcela(p, gravado) for p in por_id.get(cid, [])), key=lambda p: p["n"])
+        # A forma da cobrança sai das parcelas: as duas formas juntas = híbrida.
+        formas = {p["tipo"] for p in ps}
+        tipo = TIPO_HIBRIDO if len(formas) > 1 else (formas.pop() if formas else gravado)
+        hibrida = tipo == TIPO_HIBRIDO
         # "Parcela 3 de 10" conta pela POSIÇÃO, não pelo Nº gravado: se uma
         # parcela do meio for removida, as outras não ficam com buraco.
-        total_n = sum(1 for p in ps if p["n"] > 0)
-        posicao = 0
+        # Na híbrida a conta é separada por forma ("Pix 2 de 3", "Cartão 1 de 2").
+        por_forma_n = {f: sum(1 for p in ps if p["n"] > 0 and p["tipo"] == f) for f in FORMAS}
+        total_n = sum(por_forma_n.values())
+        posicao = {f: 0 for f in FORMAS}
+        geral = 0
         for p in ps:
             if p["n"] > 0:
-                posicao += 1
+                geral += 1
+                posicao[p["tipo"]] += 1
+            pos, de = (posicao[p["tipo"]], por_forma_n[p["tipo"]]) if hibrida else (geral, total_n)
             p["situacao"] = situacao_parcela(p, hoje)
-            p["rotulo"] = rotulo_parcela(tipo, posicao if p["n"] > 0 else 0, total_n)
-            p["total_n"] = total_n
+            p["rotulo"] = rotulo_parcela(p["tipo"], pos if p["n"] > 0 else 0, de, hibrida)
+            p["total_n"] = de
             p["id_cobranca"] = cid
 
         pago = sum(p["valor"] for p in ps if p["paga"])
@@ -386,6 +469,9 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         saida.append({
             "id": cid,
             "tipo": tipo,
+            "hibrida": hibrida,
+            # quanto de cada forma: {"Pix": {"pago", "falta", "total", "n"}, "Cartão": {...}}
+            "por_forma": {f: _soma_da_forma(ps, f) for f in FORMAS},
             "cliente": _txt(c.get("Cliente")),
             "turma": turma,
             "treinamento": _txt(c.get("Treinamento")) or treinamento_da_turma(turma),

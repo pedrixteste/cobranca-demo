@@ -70,6 +70,9 @@ JS = r"""
     const r = el.getBoundingClientRect(); const cs = getComputedStyle(el);
     if (r.width < 2 || r.height < 2 || cs.visibility === "hidden" || cs.display === "none") return;
     if (el.closest('[class*="st-key-tq_"]')) return;
+    // chave liga/desliga e bolinha de escolha têm um <input> invisível, sem texto digitado:
+    // o rótulo delas já foi medido como texto, lá em cima
+    if (el.type === "checkbox" || el.type === "radio") return;
     const bg = fundo(el);
     const medir = (corTxt, rot) => { let cor = rgb(corTxt); if (!cor) return; cor = mistura(cor, bg);
       const L1 = lum(cor), L2 = lum(bg); const cr = (Math.max(L1, L2) + .05) / (Math.min(L1, L2) + .05); total++;
@@ -237,6 +240,31 @@ with sync_playwright() as p:
     auditar(page, "35_ficha_com_observacao")
     abrir(page)
     tocar(page, ".st-key-hm_rel .hm-card"); auditar(page, "36_relatorio_com_obs")
+    # pagamento híbrido: cadastro, ficha e a janela de receber metade em cada forma
+    abrir(page)
+    tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_hibrido .hm-card"); auditar(page, "37_hibrido_vazio")
+    botao(page, "Salvar cobrança"); auditar(page, "38_hibrido_erros")
+    campo(page, "Valor total").fill("6000")
+    campo(page, "Quanto vai no Pix").fill("7000"); campo(page, "Quanto vai no Pix").press("Enter"); esperar(page)
+    auditar(page, "39_hibrido_pix_maior_que_total")
+    campo(page, "Quanto vai no Pix").fill("2000"); campo(page, "Valor de entrada").fill("500")
+    campo(page, "Número de parcelas").fill("2"); campo(page, "Número de parcelas").press("Enter"); esperar(page)
+    campo(page, "Quantas vezes você vai passar o cartão?").fill("2")
+    campo(page, "Quantas vezes você vai passar o cartão?").press("Enter"); esperar(page)
+    auditar(page, "40_hibrido_cheio")
+    abrir(page)
+    tocar(page, ".st-key-hm_rel .hm-card")
+    box = page.locator(".cc", has_text="Juliana Martins").first.bounding_box()
+    page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); esperar(page)
+    auditar(page, "41_ficha_hibrida")
+    botao(page, "Recebi")
+    page.locator("[role=dialog] label", has_text="Pagamento híbrido").first.click(); esperar(page)
+    page.locator("[role=dialog] input[aria-label='Quanto foi no cartão']").fill("300")
+    page.locator("[role=dialog] input[aria-label='Quanto foi no cartão']").press("Enter"); esperar(page)
+    auditar(page, "42_dlg_recebi_hibrido"); page.keyboard.press("Escape"); esperar(page)
+    botao(page, "Adicionar parcela ou data"); auditar(page, "43_dlg_adicionar_hibrido")
+    page.keyboard.press("Escape"); esperar(page)
+
     abrir(page)
     botao(page, "Usando como"); auditar(page, "32_trocar_pessoa")
     b.close()

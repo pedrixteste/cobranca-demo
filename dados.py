@@ -291,6 +291,26 @@ def restaurar_cobranca(banco, cid: str) -> bool:
     return banco.atualizar_cobranca(cid, {"Situação": SITUACAO_ATIVA, "Excluída em": ""})
 
 
+def receber_em_duas_formas(banco, cid: str, n: int, campos_parcela: dict, nova: dict) -> bool:
+    """
+    Pagamento híbrido de UMA parcela (as duas partes vêm de nucleo.dividir_recebimento):
+    grava a linha nova e depois a parcela. São duas gravações; se a segunda falhar, a
+    primeira é desfeita, para a cobrança não ficar com dinheiro a mais.
+    """
+    banco.adicionar_parcela(cid, nova)
+    try:
+        ok = banco.atualizar_parcela(cid, n, campos_parcela)
+    except Exception:
+        try:
+            banco.remover_parcela(cid, nova["Nº"])
+        except Exception:
+            pass
+        raise
+    if not ok:
+        banco.remover_parcela(cid, nova["Nº"])
+    return ok
+
+
 # ── Comprovantes no Drive (opcional) ──────────────────────────────────────────
 
 def drive_configurado(secrets) -> bool:

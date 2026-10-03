@@ -146,7 +146,8 @@ header[data-testid="stHeader"] { display: none; }
                 font-family: var(--mono); font-size: .75rem; display: grid; place-items: center; }
 .px-lista { font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
             color: var(--apoio); margin: .5rem 0 -.2rem; }
-[class*="st-key-px_linha_"], [class*="st-key-ct_linha_"] {
+[class*="st-key-px_linha_"], [class*="st-key-ct_linha_"],
+[class*="st-key-hb_px_linha_"], [class*="st-key-hb_ct_linha_"] {
     border-left: 3px solid var(--linha); padding-left: 10px; }
 
 /* ── Cores de situação (chips) ───────────────────────────────────────────── */
@@ -159,6 +160,8 @@ header[data-testid="stHeader"] { display: none; }
 .tp { font-size: .66rem; font-weight: 700; padding: 1px 7px; border-radius: 99px; white-space: nowrap; flex: none; }
 .tp-pix    { background: var(--pix-bg);    color: var(--pix); }
 .tp-cartao { background: var(--cartao-bg); color: var(--cartao-cor); }
+/* híbrido = as duas formas juntas: metade azul do Pix, metade rosa do cartão */
+.tp-hib    { background: linear-gradient(90deg, var(--pix-bg) 0 50%, var(--cartao-bg) 50% 100%); color: var(--tinta); }
 
 .pg   { height: 7px; background: var(--neutro-bg); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
 .pg i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
@@ -278,6 +281,14 @@ header[data-testid="stHeader"] { display: none; }
 .fc-nums span { font-size: .74rem; font-weight: 700; color: var(--apoio); }
 .fc-nums div:first-child b, .fc-nums div:first-child span { color: var(--ok); }
 .fc-nums .atr b, .fc-nums .atr span { color: var(--atraso); }
+/* cobrança híbrida: quanto é de cada forma (na ficha) e o título de cada bloco de parcelas */
+.fc-formas { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--linha);
+             display: flex; flex-direction: column; gap: 4px; }
+.fc-formas div  { display: flex; align-items: center; gap: 7px; font-size: .82rem; color: var(--apoio); }
+.fc-formas .tp  { min-width: 3.4rem; text-align: center; }
+.fc-formas b    { font-family: var(--mono); font-weight: 600; color: var(--tinta); }
+.fc-grupo { font-family: var(--display); font-weight: 800; font-size: 1.05rem; color: var(--tinta);
+            margin: 10px 0 -4px; }
 .fc-aviso { margin-top: 8px; font-size: .8rem; color: var(--breve); }
 .fc-quem  { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--linha); font-size: .8rem; color: var(--apoio); }
 .fc-quem b { color: var(--tinta); font-weight: 600; }

@@ -312,6 +312,206 @@ class Cidade(unittest.TestCase):
         self.assertIn("(L345 · Lajeado)", notifier.montar_diario(cobs, HOJE))
 
 
+class Hibrido(unittest.TestCase):
+    """Pagamento híbrido: uma parte no Pix e outra no cartão, na mesma cobrança."""
+
+    def linhas(self):
+        # R$ 6.000: Pix 3.000 (entrada 1.000 paga + 2x 1.000) e cartão 3.000 (1.500 já passou + 1.500 a passar)
+        return n.parcelas_hibrido(1000, date(2026, 9, 20), [1000.0, 1000.0],
+                                  [date(2026, 10, 20), date(2026, 11, 20)],
+                                  [1500.0, 1500.0], [date(2026, 9, 20), date(2026, 10, 14)],
+                                  [3, 6], [True, False], HOJE)
+
+    def montar(self):
+        import dados
+        cab = n.PARCELAS_HEADERS
+        parcelas = [dict(zip(cab, dados._linha(cab, {**l, "ID Cobrança": "a1"}))) for l in self.linhas()]
+        return n.montar_cobrancas([cob(tipo="Híbrido", total="6000,00")], parcelas, HOJE)[0]
+
+    def test_linhas_do_cadastro(self):
+        linhas = self.linhas()
+        self.assertEqual([l["Nº"] for l in linhas], [0, 1, 2, 3, 4])           # numeração única
+        self.assertEqual([l["Forma"] for l in linhas], ["Pix", "Pix", "Pix", "Cartão", "Cartão"])
+        self.assertEqual([l["Status"] for l in linhas], ["Paga", "", "", "Paga", ""])
+        self.assertEqual(linhas[3]["Pago em"], date(2026, 9, 20))               # passou no dia da passada
+        self.assertEqual([l.get("Vezes no cartão") for l in linhas], [None, None, None, 3, 6])
+        self.assertEqual(n.conferir_total(6000, [l["Valor"] for l in linhas]), 0)
+
+    def test_sem_entrada_e_sem_parcela_de_pix(self):
+        so_entrada = n.parcelas_hibrido(500, date(2026, 9, 30), [], [], [800.0], [date(2026, 10, 5)],
+                                        [2], [False], HOJE)
+        self.assertEqual([(l["Nº"], l["Forma"]) for l in so_entrada], [(0, "Pix"), (1, "Cartão")])
+        sem_entrada = n.parcelas_hibrido(0, None, [500.0], [date(2026, 10, 5)], [800.0],
+                                         [date(2026, 10, 5)], None, None, HOJE)
+        self.assertEqual([(l["Nº"], l["Forma"], l["Status"]) for l in sem_entrada],
+                         [(1, "Pix", ""), (2, "Cartão", "")])
+
+    def test_cobranca_montada(self):
+        c = self.montar()
+        self.assertEqual(c["tipo"], "Híbrido")
+        self.assertTrue(c["hibrida"])
+        self.assertEqual([p["rotulo"] for p in c["parcelas"]],
+                         ["Entrada no Pix", "Pix 1 de 2", "Pix 2 de 2", "Cartão 1 de 2", "Cartão 2 de 2"])
+        self.assertEqual([p["tipo"] for p in c["parcelas"]], ["Pix", "Pix", "Pix", "Cartão", "Cartão"])
+        self.assertEqual((c["pago"], c["falta"]), (2500, 3500))
+        self.assertEqual(c["por_forma"]["Pix"], {"pago": 1000, "falta": 2000, "total": 3000, "n": 3})
+        self.assertEqual(c["por_forma"]["Cartão"], {"pago": 1500, "falta": 1500, "total": 3000, "n": 2})
+        self.assertEqual(c["parcelas"][3]["vezes"], 3)
+        self.assertEqual(c["proxima"]["rotulo"], "Cartão 2 de 2")               # 14/10 vem antes de 20/10
+
+    def test_o_que_ja_existe_nao_muda(self):
+        """Parcela sem a coluna Forma vale a forma da cobrança: nada vira híbrido sozinho."""
+        pix = n.montar_cobrancas([cob()], [parc("a1", 0, "01/09/2026", "500,00", "Paga"),
+                                           parc("a1", 1, "01/10/2026", "500,00")], HOJE)[0]
+        self.assertEqual((pix["tipo"], pix["hibrida"]), ("Pix", False))
+        self.assertEqual([p["rotulo"] for p in pix["parcelas"]], ["Entrada", "Parcela 1 de 1"])
+        self.assertEqual([p["tipo"] for p in pix["parcelas"]], ["Pix", "Pix"])
+        cartao = n.montar_cobrancas([cob(tipo="Cartão")], [parc("a1", 1, "01/10/2026", "500,00")], HOJE)[0]
+        self.assertEqual((cartao["tipo"], cartao["hibrida"]), ("Cartão", False))
+        self.assertEqual(cartao["parcelas"][0]["tipo"], "Cartão")
+        self.assertEqual(cartao["por_forma"]["Pix"]["n"], 0)
+
+    def test_vira_hibrida_quando_uma_parcela_troca_de_forma(self):
+        c = n.montar_cobrancas([cob()], [parc("a1", 1, "01/10/2026", "500,00"),
+                                         {**parc("a1", 2, "01/11/2026", "500,00"), "Forma": "Cartão"},
+                                         parc("a1", 3, "01/12/2026", "500,00")], HOJE)[0]
+        self.assertEqual(c["tipo"], "Híbrido")
+        self.assertEqual([p["rotulo"] for p in c["parcelas"]], ["Pix 1 de 2", "Cartão 1 de 1", "Pix 2 de 2"])
+
+    def test_volta_a_ser_de_uma_forma_so(self):
+        # Gravada como Híbrido, mas sobrou só Pix (a passada do cartão foi removida)
+        c = n.montar_cobrancas([cob(tipo="Híbrido")],
+                               [{**parc("a1", 1, "01/10/2026", "500,00"), "Forma": "Pix"}], HOJE)[0]
+        self.assertEqual((c["tipo"], c["hibrida"]), ("Pix", False))
+        self.assertEqual(c["parcelas"][0]["rotulo"], "Parcela 1 de 1")
+        # Todas as parcelas de uma cobrança Pix viraram cartão
+        c = n.montar_cobrancas([cob()], [{**parc("a1", 1, "01/10/2026", "500,00"), "Forma": "cartao"}], HOJE)[0]
+        self.assertEqual((c["tipo"], c["parcelas"][0]["rotulo"]), ("Cartão", "Cartão 1 de 1"))
+
+    def test_forma_escrita_de_qualquer_jeito(self):
+        self.assertEqual(n.forma_da_parcela(" CARTÃO ", "Pix"), "Cartão")
+        self.assertEqual(n.forma_da_parcela("pix", "Cartão"), "Pix")
+        self.assertEqual(n.forma_da_parcela("", "Cartão"), "Cartão")
+        self.assertEqual(n.forma_da_parcela("", "Híbrido"), "Pix")
+        self.assertEqual(n.forma_da_parcela("boleto", "Pix"), "Pix")
+
+    def test_filtro_e_busca(self):
+        cobs = n.montar_cobrancas(
+            [cob("a1", cliente="Maria"), cob("b2", tipo="Cartão", cliente="João"), cob("c3", cliente="Ana")],
+            [parc("a1", 1, "20/10/2026", "100,00"), parc("b2", 1, "20/10/2026", "100,00"),
+             parc("c3", 1, "20/10/2026", "100,00"), {**parc("c3", 2, "20/11/2026", "100,00"), "Forma": "Cartão"}],
+            HOJE)
+        nomes = lambda lista: sorted(c["cliente"] for c in lista)
+        self.assertEqual(nomes(n.filtrar(cobs, tipos=["Híbrido"])), ["Ana"])
+        self.assertEqual(nomes(n.filtrar(cobs, tipos=["Pix"])), ["Maria"])
+        self.assertEqual(nomes(n.filtrar(cobs, tipos=["Pix", "Híbrido"])), ["Ana", "Maria"])
+        self.assertEqual(nomes(n.filtrar(cobs, "hibrido")), ["Ana"])
+
+    def test_telegram_diz_a_forma_de_cada_parcela(self):
+        cobs = n.montar_cobrancas(
+            [cob(tipo="Híbrido")],
+            [{**parc("a1", 1, "30/09/2026", "500,00"), "Forma": "Pix"},
+             {**parc("a1", 2, "30/09/2026", "1500,00"), "Forma": "Cartão", "Vezes no cartão": "3"}], HOJE)
+        txt = notifier.montar_diario(cobs, HOJE)
+        self.assertIn("pix 1 de 1 (híbrido) · 30/09", txt)
+        self.assertIn("cartão 1 de 1 (híbrido) · 💳 passar cartão em 3x · 30/09", txt)
+
+    def test_telegram_de_cobranca_comum_continua_igual(self):
+        cobs = n.montar_cobrancas([cob()], [parc("a1", 1, "30/09/2026", "450,00")], HOJE)
+        self.assertIn("parcela 1 de 1 · Pix · 30/09", notifier.montar_diario(cobs, HOJE))
+
+
+class ReceberMetadeEmCadaForma(unittest.TestCase):
+    """Na hora de receber UMA parcela: parte no Pix, parte no cartão."""
+
+    def banco(self):
+        import tempfile, os, dados
+        caminho = os.path.join(tempfile.mkdtemp(), "t.local.json")
+        b = dados.Local(caminho)
+        cid = b.criar_cobranca({"Tipo": "Pix", "Cliente": "Maria", "Turma": "L345", "Valor Total": 3000.0},
+                               n.parcelas_pix(0, None, [1000.0] * 3, n.datas_continuas(date(2026, 10, 5), 3), HOJE))
+        return dados, b, cid
+
+    def cobranca(self, b, cid):
+        d = b.carregar()
+        return next(c for c in n.montar_cobrancas(d["cobrancas"], d["parcelas"], HOJE) if c["id"] == cid)
+
+    PAGAMENTO = {"Pago em": date(2026, 10, 5), "Marcado por": "Gabi", "Comprovante": "", "Observação": "obs"}
+
+    def test_parcela_do_pix_com_parte_no_cartao(self):
+        dados, b, cid = self.banco()
+        c = self.cobranca(b, cid)
+        da_parcela, nova = n.dividir_recebimento(c["parcelas"][0], 600.0, n.proximo_numero(c["parcelas"]), 3,
+                                                 self.PAGAMENTO)
+        self.assertEqual((da_parcela["Valor"], da_parcela["Forma"]), (400.0, "Pix"))
+        self.assertNotIn("Vezes no cartão", da_parcela)
+        self.assertEqual((nova["Nº"], nova["Valor"], nova["Forma"], nova["Vezes no cartão"]), (4, 600.0, "Cartão", 3))
+        self.assertTrue(dados.receber_em_duas_formas(b, cid, 1, da_parcela, nova))
+
+        c = self.cobranca(b, cid)
+        self.assertEqual(c["tipo"], "Híbrido")
+        self.assertEqual((c["pago"], c["falta"]), (1000, 2000))                 # o total da cobrança não muda
+        self.assertEqual([(p["rotulo"], p["valor"], p["paga"]) for p in c["parcelas"]],
+                         [("Pix 1 de 3", 400.0, True), ("Pix 2 de 3", 1000.0, False),
+                          ("Pix 3 de 3", 1000.0, False), ("Cartão 1 de 1", 600.0, True)])
+        nova_p = c["parcelas"][3]
+        self.assertEqual((nova_p["vencimento"], nova_p["pago_em"], nova_p["marcado_por"], nova_p["vezes"],
+                          nova_p["observacao"]), (date(2026, 10, 5), date(2026, 10, 5), "Gabi", 3, "obs"))
+        self.assertEqual(c["por_forma"]["Cartão"]["pago"], 600)
+
+    def test_parcela_do_cartao_com_parte_no_pix(self):
+        p = {"tipo": "Cartão", "valor": 1000.0, "vencimento": date(2026, 10, 5), "n": 2}
+        da_parcela, nova = n.dividir_recebimento(p, 250.5, 9, 4, self.PAGAMENTO)
+        self.assertEqual((da_parcela["Valor"], da_parcela["Forma"], da_parcela["Vezes no cartão"]),
+                         (749.5, "Cartão", 4))
+        self.assertEqual((nova["Valor"], nova["Forma"]), (250.5, "Pix"))
+        self.assertNotIn("Vezes no cartão", nova)
+
+    def test_centavos_nao_somem(self):
+        p = {"tipo": "Pix", "valor": 333.33, "vencimento": date(2026, 10, 5), "n": 1}
+        da_parcela, nova = n.dividir_recebimento(p, 111.12, 2, 1, self.PAGAMENTO)
+        self.assertEqual(n.conferir_total(333.33, [da_parcela["Valor"], nova["Valor"]]), 0)
+
+    def test_se_a_segunda_gravacao_falha_a_primeira_e_desfeita(self):
+        dados, b, cid = self.banco()
+        c = self.cobranca(b, cid)
+        da_parcela, nova = n.dividir_recebimento(c["parcelas"][0], 600.0, 4, 1, self.PAGAMENTO)
+        # parcela que não existe mais (alguém removeu no meio): nada pode sobrar gravado
+        self.assertFalse(dados.receber_em_duas_formas(b, cid, 99, da_parcela, nova))
+        self.assertEqual(len(self.cobranca(b, cid)["parcelas"]), 3)
+
+        original = b.atualizar_parcela
+        b.atualizar_parcela = lambda *a, **k: (_ for _ in ()).throw(OSError("planilha fora do ar"))
+        with self.assertRaises(OSError):
+            dados.receber_em_duas_formas(b, cid, 1, da_parcela, nova)
+        b.atualizar_parcela = original
+        c = self.cobranca(b, cid)
+        self.assertEqual((len(c["parcelas"]), c["tipo"], c["pago"], c["falta"]), (3, "Pix", 0, 3000))
+
+
+class BackupComHibrido(unittest.TestCase):
+    def test_excel_mostra_a_forma_de_cada_parcela(self):
+        import io
+        import backup
+        from openpyxl import load_workbook
+        cab_c, cab_p = n.COBRANCAS_HEADERS, n.PARCELAS_HEADERS
+        linha = lambda cab, campos: [str(campos.get(h, "")) for h in cab]
+        copia = {"feito_em": "2026-09-30T10:00:00-03:00", "impressao": "x", "planilha": "teste", "abas": {
+            "_Cobrancas": [cab_c, linha(cab_c, {"ID": "a1", "Tipo": "Híbrido", "Cliente": "Maria", "Turma": "L345",
+                                               "Valor Total": "2000,00", "Situação": "Ativa"})],
+            "_Parcelas": [cab_p, linha(cab_p, {"ID Cobrança": "a1", "Nº": 1, "Vencimento": "05/10/2026",
+                                              "Valor": "500,00", "Forma": "Pix"}),
+                          linha(cab_p, {"ID Cobrança": "a1", "Nº": 2, "Vencimento": "05/10/2026",
+                                        "Valor": "1500,00", "Forma": "Cartão", "Vezes no cartão": 3})]}}
+        wb = load_workbook(io.BytesIO(backup.gerar_xlsx(copia)))
+        resumo = [[c.value for c in r] for r in wb[backup.ABAS_LEITURA[0]].iter_rows()]
+        self.assertTrue(any("Maria" in r and "Híbrido" in r for r in resumo), resumo[9:12])
+        parcelas = [[c.value for c in r] for r in wb[backup.ABAS_LEITURA[1]].iter_rows()]
+        self.assertEqual([(r[3], r[4]) for r in parcelas[1:]], [("Pix", "Pix 1 de 1"), ("Cartão", "Cartão 1 de 1")])
+        # a cópia exata leva a coluna nova, para a planilha ser reconstruída igual
+        self.assertEqual(wb["_Parcelas"]["L1"].value, "Forma")
+
+
 class Notificacoes(unittest.TestCase):
     CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
            "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}
