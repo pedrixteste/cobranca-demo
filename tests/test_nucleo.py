@@ -512,6 +512,72 @@ class BackupComHibrido(unittest.TestCase):
         self.assertEqual(wb["_Parcelas"]["L1"].value, "Forma")
 
 
+class VariasTurmas(unittest.TestCase):
+    """Uma cobrança para mais de uma turma (pedido 16/10)."""
+
+    def test_ler_varias(self):
+        self.assertEqual(n.normalizar_turmas("L345, v12"), ["L345", "V12"])
+        self.assertEqual(n.normalizar_turmas("L345 + V0012"), ["L345", "V12"])
+        self.assertEqual(n.normalizar_turmas("l345 e i7"), ["L345", "I7"])
+        self.assertEqual(n.normalizar_turmas("L 345"), ["L345"])            # espaço dentro da turma não separa
+        self.assertEqual(n.normalizar_turmas("L345, l00345"), ["L345"])     # repetida conta uma vez
+        self.assertEqual(n.normalizar_turmas(""), [])
+        self.assertIsNone(n.normalizar_turmas("L345, X9"))
+        self.assertEqual(n.treinamentos_das_turmas(["L345", "L346", "V12"]), ["LORAP", "Vendas"])
+
+    def setUp(self):
+        self.cobs = n.montar_cobrancas(
+            [{**cob("a1", cliente="Maria", turma="L345, V12"), "Treinamento": "LORAP, Vendas", "Cidade": "Lajeado"},
+             cob("b2", cliente="João", turma="L345"),
+             cob("c3", cliente="Ana", turma="I7")],
+            [parc(i, 1, "20/10/2026", "100,00") for i in ("a1", "b2", "c3")], HOJE)
+
+    def test_cobranca_com_duas_turmas(self):
+        c = self.cobs[0]
+        self.assertEqual((c["turma"], c["turmas"]), ("L345 + V12", ["L345", "V12"]))
+        self.assertEqual((c["treinamento"], c["treinamentos"]), ("LORAP + Vendas", ["LORAP", "Vendas"]))
+        self.assertEqual(n.local_da_cobranca(c), "L345 + V12 · LORAP + Vendas · Lajeado")
+
+    def test_uma_turma_continua_igual(self):
+        c = self.cobs[1]
+        self.assertEqual((c["turma"], c["turmas"], c["treinamento"]), ("L345", ["L345"], "LORAP"))
+
+    def test_filtros_e_busca_acham_qualquer_uma_das_turmas(self):
+        nomes = lambda lista: sorted(c["cliente"] for c in lista)
+        self.assertEqual(nomes(n.filtrar(self.cobs, turma="v12")), ["Maria"])
+        self.assertEqual(nomes(n.filtrar(self.cobs, turma="L345")), ["João", "Maria"])
+        self.assertEqual(nomes(n.filtrar(self.cobs, treinamentos=["Vendas"])), ["Maria"])
+        self.assertEqual(nomes(n.filtrar(self.cobs, treinamentos=["LORAP"])), ["João", "Maria"])
+        self.assertEqual(nomes(n.filtrar(self.cobs, "v012")), ["Maria"])
+        self.assertEqual(n.cidade_da_turma(self.cobs, "V12"), "Lajeado")
+
+
+class CobrancaAntiga(unittest.TestCase):
+    """Cobrança de datas antigas (pedido 16/10): parcela que já passou pode entrar como já paga."""
+
+    def test_pix_com_parcelas_ja_pagas(self):
+        linhas = n.parcelas_pix(0, None, [500.0] * 3, [date(2025, 3, 15), date(2025, 4, 15), date(2026, 10, 15)],
+                                HOJE, [True, False, False])
+        self.assertEqual([(l["Status"], l["Pago em"]) for l in linhas],
+                         [("Paga", date(2025, 3, 15)), ("", None), ("", None)])
+
+    def test_sem_marcar_nada_continua_igual(self):
+        self.assertEqual(n.parcelas_pix(0, None, [500.0], [date(2025, 3, 15)], HOJE),
+                         [{"Nº": 1, "Vencimento": date(2025, 3, 15), "Valor": 500.0, "Status": "", "Pago em": None}])
+
+    def test_cartao_com_passada_que_ja_passou(self):
+        linhas = n.parcelas_cartao(0, HOJE, [1000.0, 1000.0], [date(2025, 3, 15), date(2026, 11, 1)], [3, 1],
+                                   [True, False])
+        self.assertEqual([(l["Status"], l["Pago em"], l["Vezes no cartão"]) for l in linhas],
+                         [("Paga", date(2025, 3, 15), 3), ("", None, 1)])
+
+    def test_hibrida_com_parcela_do_pix_ja_paga(self):
+        linhas = n.parcelas_hibrido(0, None, [500.0, 500.0], [date(2025, 3, 15), date(2026, 11, 15)],
+                                    [1000.0], [date(2025, 3, 15)], [2], [True], HOJE, [True, False])
+        self.assertEqual([(l["Forma"], l["Status"]) for l in linhas],
+                         [("Pix", "Paga"), ("Pix", ""), ("Cartão", "Paga")])
+
+
 class Notificacoes(unittest.TestCase):
     CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
            "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}

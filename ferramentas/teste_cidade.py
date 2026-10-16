@@ -1,5 +1,6 @@
 """
 Teste do campo Cidade (texto livre, abaixo da Turma). Só contra a DEMONSTRAÇÃO local (porta 8612).
+Desde 16/10/2026 o app grava tudo em MAIÚSCULA (cliente, cidade, observação).
 """
 import sys
 from pathlib import Path
@@ -77,21 +78,21 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT / "cidade_1_form.png"))
     botao(page, "Salvar cobrança"); esperar(page, 2500)
     sub = page.locator(".cx-sub").first.inner_text()
-    confere("ficha mostra a cidade", "L700 · LORAP · Lajeado" in sub, sub)
+    confere("ficha mostra a cidade", "L700 · LORAP · LAJEADO" in sub, sub)
 
     # 2. mesma turma de novo: sugere a cidade já usada; cadastro SEM cidade é aceito
     inicio(page)
     dica = cadastrar_pix(page, "Marcos Sem Cidade", "L0700", None)
-    confere("turma repetida sugere a cidade já usada", "Lajeado" in dica, dica)
+    confere("turma repetida sugere a cidade já usada", "LAJEADO" in dica, dica)
     botao(page, "Salvar cobrança"); esperar(page, 2500)
     sub = page.locator(".cx-sub").first.inner_text()
-    confere("cidade é opcional (salvou sem)", "Marcos" in page.locator(".cx-titulo").first.inner_text() and "Lajeado" not in sub, sub)
+    confere("cidade é opcional (salvou sem)", "MARCOS" in page.locator(".cx-titulo").first.inner_text().upper() and "LAJEADO" not in sub, sub)
 
     # 3. editar: escrever qualquer coisa
     botao(page, "Editar dados")
     por(page, "Cidade da turma", "SCS", "[role=dialog]"); botao(page, "Salvar", "[role=dialog]"); esperar(page, 2500)
     sub = page.locator(".cx-sub").first.inner_text()
-    confere("Editar dados troca a cidade", "L700 · LORAP · SCS" in sub, sub)
+    confere("Editar dados troca a cidade", "L700 · LORAP · SCS" in sub.upper(), sub)
 
     # 4. relatório: aparece no cartão e a busca acha
     inicio(page); tocar(page, ".st-key-hm_rel .hm-card")

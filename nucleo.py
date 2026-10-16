@@ -106,6 +106,30 @@ def treinamento_da_turma(turma) -> str:
     return TREINAMENTOS[t[0]] if t else ""
 
 
+# Uma cobrança pode valer para MAIS DE UMA turma (ex.: o cliente fechou LORAP e
+# Vendas juntos). Na planilha a coluna Turma guarda "L345, V12" e a Treinamento
+# "LORAP, Vendas"; na tela elas aparecem como "L345 + V12".
+_RE_SEPARA_TURMAS = re.compile(r"[,;/+&]|\s+e\s+", re.IGNORECASE)
+SEP_TURMAS_PLANILHA = ", "
+SEP_TURMAS_TELA = " + "
+
+
+def normalizar_turmas(texto) -> list[str] | None:
+    """
+    'L345, v12', 'L345 + V12' ou 'L345 e V12' → ['L345', 'V12'] (sem repetir).
+    [] se vazio; None se algum pedaço não for turma.
+    """
+    partes = [p for p in _RE_SEPARA_TURMAS.split(_txt(texto)) if p.strip()]
+    turmas = [normalizar_turma(p) for p in partes]
+    if any(t is None for t in turmas):
+        return None
+    return list(dict.fromkeys(turmas))
+
+
+def treinamentos_das_turmas(turmas: list[str]) -> list[str]:
+    return list(dict.fromkeys(treinamento_da_turma(t) for t in turmas if treinamento_da_turma(t)))
+
+
 # ── Valores ───────────────────────────────────────────────────────────────────
 
 _RE_BR      = re.compile(r"\d{1,3}(\.\d{3})+(,\d+)?|\d+(,\d+)?")
@@ -227,13 +251,19 @@ def linhas_de_valores(values: list[list]) -> list[dict]:
 
 # ── Montagem das parcelas no cadastro ─────────────────────────────────────────
 
+def _ja_paga(linha: dict, paga: bool) -> dict:
+    """Parcela que já foi paga quando a cobrança foi cadastrada: paga na data dela."""
+    return {**linha, "Status": STATUS_PAGA, "Pago em": linha["Vencimento"]} if paga else linha
+
+
 def parcelas_pix(entrada: float, data_entrada: date | None, valores: list[float],
-                 datas: list[date], hoje: date) -> list[dict]:
+                 datas: list[date], hoje: date, ja_pagas: list[bool] | None = None) -> list[dict]:
     """
     Linhas de _Parcelas de uma cobrança Pix nova.
 
     A entrada é o que a pessoa pagou primeiro: entra como paga na data dela.
     Se a data da entrada ainda não chegou, fica em aberto para ser cobrada.
+    `ja_pagas[k]` = a parcela k já tinha sido paga (cobrança antiga cadastrada agora).
     """
     linhas = []
     if entrada and entrada > 0 and data_entrada:
@@ -241,8 +271,10 @@ def parcelas_pix(entrada: float, data_entrada: date | None, valores: list[float]
         linhas.append({"Nº": 0, "Vencimento": data_entrada, "Valor": entrada,
                        "Status": STATUS_PAGA if paga else "",
                        "Pago em": data_entrada if paga else None})
+    pagas = list(ja_pagas or []) + [False] * len(valores)
     for k, (v, d) in enumerate(zip(valores, datas), start=1):
-        linhas.append({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None})
+        linhas.append(_ja_paga({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None},
+                               pagas[k - 1]))
     return linhas
 
 
@@ -250,7 +282,8 @@ MAX_VEZES_CARTAO = 24
 
 
 def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
-                    datas: list[date], vezes: list[int] | None = None) -> list[dict]:
+                    datas: list[date], vezes: list[int] | None = None,
+                    ja_passou: list[bool] | None = None) -> list[dict]:
     """
     Linhas de uma cobrança no cartão: o já pago (Nº 0) + cada data de passar.
     `vezes[k]` = em quantas parcelas aquela passada foi (ou vai ser) dividida NO
@@ -258,32 +291,32 @@ def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
     para a cobrança o que importa é a data de passar e o valor cheio.
     """
     vezes = vezes or [1] * len(valores)
+    passou = list(ja_passou or []) + [False] * len(valores)
     linhas = []
     if ja_pago and ja_pago > 0:
         linhas.append({"Nº": 0, "Vencimento": hoje, "Valor": ja_pago,
                        "Status": STATUS_PAGA, "Pago em": hoje})
     for k, (v, d, x) in enumerate(zip(valores, datas, vezes), start=1):
-        linhas.append({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None,
-                       "Vezes no cartão": max(int(x or 1), 1)})
+        linhas.append(_ja_paga({"Nº": k, "Vencimento": d, "Valor": v, "Status": "", "Pago em": None,
+                                "Vezes no cartão": max(int(x or 1), 1)}, passou[k - 1]))
     return linhas
 
 
 def parcelas_hibrido(entrada: float, data_entrada: date | None, valores_pix: list[float],
                      datas_pix: list[date], valores_cartao: list[float], datas_cartao: list[date],
-                     vezes: list[int] | None, ja_passou: list[bool] | None, hoje: date) -> list[dict]:
+                     vezes: list[int] | None, ja_passou: list[bool] | None, hoje: date,
+                     pix_pagas: list[bool] | None = None) -> list[dict]:
     """
     Linhas de uma cobrança híbrida nova: a parte do Pix (entrada Nº 0 + parcelas)
     e, continuando a numeração, cada passada do cartão. Toda linha leva a Forma.
     `ja_passou[k]` = aquela passada já foi feita: entra como paga na data dela
-    (igual à entrada do Pix, que entra paga quando a data já chegou).
+    (igual à entrada do Pix, que entra paga quando a data já chegou); `pix_pagas`
+    faz o mesmo com as parcelas do Pix.
     """
     linhas = [{**l, "Forma": TIPO_PIX}
-              for l in parcelas_pix(entrada, data_entrada, valores_pix, datas_pix, hoje)]
-    passou = list(ja_passou or []) + [False] * len(valores_cartao)
+              for l in parcelas_pix(entrada, data_entrada, valores_pix, datas_pix, hoje, pix_pagas)]
     depois_do_pix = len(valores_pix)
-    for l, ok in zip(parcelas_cartao(0, hoje, valores_cartao, datas_cartao, vezes), passou):
-        if ok:
-            l = {**l, "Status": STATUS_PAGA, "Pago em": l["Vencimento"]}
+    for l in parcelas_cartao(0, hoje, valores_cartao, datas_cartao, vezes, ja_passou):
         linhas.append({**l, "Nº": depois_do_pix + l["Nº"], "Forma": TIPO_CARTAO})
     return linhas
 
@@ -465,7 +498,14 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         else:
             sit = CLI_EM_DIA
 
-        turma = normalizar_turma(c.get("Turma")) or _txt(c.get("Turma"))
+        # Uma turma (o normal) ou várias ("L345, V12"); texto que não é turma fica como está
+        turmas = normalizar_turmas(c.get("Turma")) or ([_txt(c.get("Turma"))] if _txt(c.get("Turma")) else [])
+        turma = SEP_TURMAS_TELA.join(turmas)
+        if len(turmas) > 1:
+            treinos = treinamentos_das_turmas(turmas)
+        else:
+            treinos = [_txt(c.get("Treinamento")) or treinamento_da_turma(turma)]
+        treinos = [t for t in treinos if t]
         saida.append({
             "id": cid,
             "tipo": tipo,
@@ -473,8 +513,10 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             # quanto de cada forma: {"Pix": {"pago", "falta", "total", "n"}, "Cartão": {...}}
             "por_forma": {f: _soma_da_forma(ps, f) for f in FORMAS},
             "cliente": _txt(c.get("Cliente")),
-            "turma": turma,
-            "treinamento": _txt(c.get("Treinamento")) or treinamento_da_turma(turma),
+            "turma": turma,                     # "L345" ou "L345 + V12"
+            "turmas": turmas,                   # ["L345", "V12"]
+            "treinamento": SEP_TURMAS_TELA.join(treinos),
+            "treinamentos": treinos,
             "valor_total": valor_para_float(c.get("Valor Total")),
             "criada_em": parse_data(c.get("Criada em")),
             "criada_por": _txt(c.get("Criada por")),
@@ -501,7 +543,7 @@ def cidade_da_turma(cobs: list[dict], turma: str) -> str:
     """Cidade mais usada nas cobranças já cadastradas daquela turma ('' se nenhuma tem)."""
     contagem: dict[str, int] = {}
     for c in cobs:
-        if c["turma"] == turma and c.get("cidade"):
+        if turma in c.get("turmas", [c["turma"]]) and c.get("cidade"):
             contagem[c["cidade"]] = contagem.get(c["cidade"], 0) + 1
     return max(contagem, key=contagem.get) if contagem else ""
 
@@ -531,7 +573,7 @@ def casa_busca(c: dict, termo: str) -> bool:
     if not termo:
         return True
     turma_buscada = normalizar_turma(termo)
-    if turma_buscada and turma_buscada == c["turma"]:
+    if turma_buscada and turma_buscada in c.get("turmas", [c["turma"]]):
         return True
     notas = " ".join([c.get("observacoes", "")] + [p.get("observacao", "") for p in c.get("parcelas", [])])
     alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {c.get('cidade', '')} {notas}")
@@ -550,9 +592,9 @@ def filtrar(cobs: list[dict], termo: str = "", situacoes=None, tipos=None,
             continue
         if tipos and c["tipo"] not in tipos:
             continue
-        if treinamentos and c["treinamento"] not in treinamentos:
+        if treinamentos and not any(t in treinamentos for t in c.get("treinamentos", [c["treinamento"]])):
             continue
-        if _txt(turma) and c["turma"] != (turma_n or _txt(turma).upper()):
+        if _txt(turma) and (turma_n or _txt(turma).upper()) not in c.get("turmas", [c["turma"]]):
             continue
         if obs == "com" and not c["tem_obs"]:
             continue

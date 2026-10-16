@@ -118,7 +118,7 @@ with sync_playwright() as p:
 
     botao(page, "Ver pagamento")
     confere("Ver pagamento traz a observação da parcela",
-            page.locator(f"{dlg} input[aria-label='Observação']").input_value().startswith("limite"))
+            page.locator(f"{dlg} input[aria-label='Observação']").input_value().upper().startswith("LIMITE"))
     page.keyboard.press("Escape"); esperar(page)
 
     # ── relatório compacto, etiqueta, filtro e busca ──

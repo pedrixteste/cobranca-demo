@@ -52,6 +52,7 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     MAX_VEZES_CARTAO, cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
+                    SEP_TURMAS_PLANILHA, normalizar_turmas, treinamentos_das_turmas,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
@@ -292,12 +293,21 @@ def _erro_campo(texto: str):
     st.markdown(f"<div class='cx-erro'>{_e(texto)}</div>", unsafe_allow_html=True)
 
 
+def _num_br(x: float) -> str:
+    """1500 → '1.500,00' (o valor sem o 'R$', como aparece dentro dos campos)."""
+    return formatar_brl(x).replace("R$ ", "")
+
+
+MARCA_VALOR = "__rs"   # fim da chave de todo campo de valor: o script _JS_CAMPOS põe ponto do milhar e ",00"
+
+
 def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
     """
     Campo de valor em reais. Devolve (valor, ok): valor None = em branco;
     ok False = digitou algo que não é valor (o aviso já aparece embaixo).
+    Enquanto a pessoa digita, o navegador já mostra '1.500,00' (ver _JS_CAMPOS).
     """
-    txt = st.text_input(rotulo, key=key, placeholder=placeholder, help=help)
+    txt = st.text_input(rotulo, key=key + MARCA_VALOR, placeholder=placeholder, help=help)
     if not txt.strip():
         return None, True
     v = valor_para_float(txt)
@@ -710,32 +720,67 @@ def tela_nova():
         _ir("hibrido")
 
 
+MAX_TURMAS = 6
+
+
+def _mais_uma_turma(prefixo: str):
+    st.session_state[f"{prefixo}n_turmas"] = min(st.session_state.get(f"{prefixo}n_turmas", 1) + 1, MAX_TURMAS)
+
+
+def _tirar_turma(prefixo: str, i: int):
+    """Tira a i-ésima turma extra e sobe as de baixo (roda antes da tela, por isso pode mexer nos campos)."""
+    n = st.session_state.get(f"{prefixo}n_turmas", 1)
+    for j in range(i, n - 1):
+        st.session_state[f"{prefixo}turma_{j}"] = st.session_state.get(f"{prefixo}turma_{j + 1}", "")
+    st.session_state.pop(f"{prefixo}turma_{n - 1}", None)
+    st.session_state[f"{prefixo}n_turmas"] = max(n - 1, 1)
+
+
 def _bloco_cliente(prefixo: str):
-    """Cliente + turma (o treinamento sai da letra da turma). Devolve (cliente, turma, treino, erros)."""
+    """
+    Cliente + turma(s): o treinamento sai da letra de cada turma. A cobrança pode valer para mais
+    de uma turma (pedido 16/10): o botão "Adicionar outra turma" abre mais um campo embaixo.
+    Devolve (cliente, turma, treino, erros), com turma e treino já como vão para a planilha
+    ("L345" e "LORAP", ou "L345, V12" e "LORAP, Vendas").
+    """
     _titulo_secao(1, "Cliente")
     cliente = st.text_input("Nome do cliente", key=f"{prefixo}cliente").strip()
-    turma_txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345",
-                              help="Letra do treinamento + número. L = LORAP, V = Vendas, "
-                                   "I = Impacto, P = Perfil. L00345 e l345 dão no mesmo.")
-    turma = normalizar_turma(turma_txt)
-    treino = TREINAMENTOS[turma[0]] if turma else ""
-    if turma:
-        _info(f"Turma <b>{turma}</b> · {treino}")
-    elif turma_txt.strip():
-        _erro_campo("Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345")
+    turmas, erros = [], []
+    for i in range(st.session_state.get(f"{prefixo}n_turmas", 1)):
+        if i == 0:
+            txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345",
+                                help="Letra do treinamento + número. L = LORAP, V = Vendas, "
+                                     "I = Impacto, P = Perfil. L00345 e l345 dão no mesmo.")
+        else:
+            c1, c2 = st.columns([6, 1], vertical_alignment="bottom")
+            with c1:
+                txt = st.text_input(f"{i + 1}ª turma", key=f"{prefixo}turma_{i}", placeholder="Ex.: V12")
+            with c2:
+                st.button("Tirar", key=f"{prefixo}tirar_{i}", icon=":material/close:", help="Tirar esta turma",
+                          on_click=_tirar_turma, args=(prefixo, i), use_container_width=True)
+        achadas = normalizar_turmas(txt)
+        if achadas:
+            _info(" &nbsp;·&nbsp; ".join(f"Turma <b>{t}</b> · {TREINAMENTOS[t[0]]}" for t in achadas))
+            turmas += [t for t in achadas if t not in turmas]
+        elif achadas is None:
+            _erro_campo("Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345")
+            erros.append("Tem turma escrita errado (ex.: L345).")
+    if st.session_state.get(f"{prefixo}n_turmas", 1) < MAX_TURMAS:
+        st.button("Adicionar outra turma", key=f"{prefixo}mais_turma", icon=":material/add:", type="tertiary",
+                  on_click=_mais_uma_turma, args=(prefixo,))
     # Cidade: texto livre e opcional (vai junto no _salvar, lida de st.session_state[f"{prefixo}cidade"])
     st.text_input("Cidade da turma", key=f"{prefixo}cidade", max_chars=40, placeholder="Ex.: Lajeado, SCS…",
                   help="Opcional. Escreva do jeito que quiser.")
-    ja_usada = cidade_da_turma(_cobrancas() or [], turma) if turma else ""
+    ja_usada = cidade_da_turma(_cobrancas() or [], turmas[0]) if turmas else ""
     if ja_usada and not st.session_state.get(f"{prefixo}cidade", "").strip():
-        st.markdown(f"<div class='cx-dica'>Outras cobranças da turma {_e(turma)} estão como "
+        st.markdown(f"<div class='cx-dica'>Outras cobranças da turma {_e(turmas[0])} estão como "
                     f"<b>{_e(ja_usada)}</b>.</div>", unsafe_allow_html=True)
-    erros = []
-    if not cliente:
-        erros.append("Falta o nome do cliente.")
-    if not turma:
+    if not turmas and not erros:   # (turma escrita errado já tem o seu aviso)
         erros.append("Falta a turma (ex.: L345).")
-    return cliente, turma, treino, erros
+    if not cliente:
+        erros.insert(0, "Falta o nome do cliente.")
+    return (cliente, SEP_TURMAS_PLANILHA.join(turmas),
+            SEP_TURMAS_PLANILHA.join(treinamentos_das_turmas(turmas)), erros)
 
 
 def _bloco_conferencia(total, partes, prefixo: str) -> bool:
@@ -759,10 +804,11 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
     st.session_state["_salvando"] = True
     try:
         cid = _banco().criar_cobranca(
-            {"Tipo": tipo, "Cliente": cliente, "Turma": turma, "Treinamento": treino,
+            # Tudo que se digita vai em MAIÚSCULA (pedido 16/10)
+            {"Tipo": tipo, "Cliente": cliente.upper(), "Turma": turma, "Treinamento": treino,
              "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
-             "Observações": observacoes.strip(),
-             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split())},
+             "Observações": observacoes.strip().upper(),
+             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split()).upper()},
             parcelas,
         )
     except Exception as e:
@@ -774,7 +820,7 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
     _limpar_campos(prefixo)
     st.session_state.cob_id = cid
     st.session_state.cob_volta = "inicio"
-    _flash(f"Cobrança de {cliente} salva")
+    _flash(f"Cobrança de {cliente.upper()} salva")
     _ir("cobranca")
 
 
@@ -802,7 +848,7 @@ def _bloco_parcelas_pix(prefixo: str, restante: float, total, primeira_padrao: d
     if modo_valor == "Contínuo":
         sugestao = restante / n if restante else 0
         vp, ok_v = _valor("Valor de cada parcela", f"{prefixo}vparc",
-                          placeholder=f"{sugestao:.2f}".replace(".", ",") if sugestao else "0,00",
+                          placeholder=_num_br(sugestao) if sugestao else "0,00",
                           help="Em branco = divide o que falta igual entre as parcelas.")
         if not ok_v:
             erros.append("Tem valor digitado errado.")
@@ -840,8 +886,25 @@ def _bloco_parcelas_pix(prefixo: str, restante: float, total, primeira_padrao: d
     return valores, datas
 
 
+def _caixas_ja_pagas(prefixo: str, valores: list, datas: list, hoje: date) -> list:
+    """
+    Cobrança antiga cadastrada agora (pedido 16/10): cada parcela com data que já passou ganha
+    a caixa "já paga", que vem marcada, senão ela entraria como atrasada (e o Telegram avisaria
+    todo dia). Devolve um sim/não por parcela.
+    """
+    if not any(d and d < hoje for d in datas):
+        return [False] * len(valores)
+    st.markdown("<div class='px-lista'>Datas que já passaram</div>", unsafe_allow_html=True)
+    pagas = []
+    for k, (d, v) in enumerate(zip(datas, valores)):
+        pagas.append(bool(d and d < hoje and st.checkbox(
+            f"{k + 1}ª parcela · {data_br(d)} · {formatar_brl(v)} · já paga", value=True,
+            key=f"{prefixo}pg{k}_{d}", help="Marcada = entra como já recebida. Desmarque se ainda não pagou.")))
+    return pagas
+
+
 def _resumo_pix(entrada: float, data_entrada, valores: list, datas: list, hoje: date,
-                com_fim: bool = True) -> list:
+                com_fim: bool = True, pagas: list | None = None) -> list:
     """Linhas do resumo do Pix: a entrada, as parcelas e (com `com_fim`) até quando vai."""
     linhas = []
     if entrada > 0 and data_entrada:
@@ -852,6 +915,10 @@ def _resumo_pix(entrada: float, data_entrada, valores: list, datas: list, hoje: 
         parc = (f"<b>{len(valores)}x de {formatar_brl(valores[0])}</b>" if iguais
                 else f"<b>{len(valores)} parcelas</b> somando {formatar_brl(sum(valores))}")
         linhas.append(f"{parc}, de {data_br(min(datas))} a {data_br(max(datas))}")
+        n_pagas = sum(1 for x in pagas or [] if x)
+        if n_pagas:
+            linhas.append(f"<b>{n_pagas} parcela{'s' if n_pagas > 1 else ''} já paga{'s' if n_pagas > 1 else ''}</b>"
+                          " (data que já passou)")
         if com_fim:
             linhas.append(f"A cobrança vai até <b>{nome_mes(max(datas))}</b>")
         if sorted(datas) != datas:
@@ -932,12 +999,13 @@ def tela_pix():
     with st.container(key="sec_px3"):
         _titulo_secao(3, "Parcelas")
         valores, datas = _bloco_parcelas_pix("px_", restante, total, mes_mais(data_entrada or hoje, 1), erros)
+        pagas = _caixas_ja_pagas("px_", valores, datas, hoje)
 
     # ── Resumo calculado ──
     confirmado = True
     with st.container(key="sec_px4"):
         _titulo_secao(4, "Resumo")
-        linhas = _resumo_pix(entrada, data_entrada, valores, datas, hoje)
+        linhas = _resumo_pix(entrada, data_entrada, valores, datas, hoje, pagas=pagas)
         if linhas:
             _info("<br>".join(linhas))
             if valores:
@@ -957,7 +1025,7 @@ def tela_pix():
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
             _salvar(TIPO_PIX, cliente, turma, treino, total,
-                    parcelas_pix(entrada, data_entrada, valores, datas, hoje), "px_", obs_px)
+                    parcelas_pix(entrada, data_entrada, valores, datas, hoje, pagas), "px_", obs_px)
 
 
 # ── Cobrança cartão ───────────────────────────────────────────────────────────
@@ -986,14 +1054,16 @@ def tela_cartao():
     with st.container(key="sec_ct3"):
         _titulo_secao(3, "Datas para passar o cartão")
         st.caption("Para quando o cliente não tem limite para passar tudo de uma vez.")
-        valores, datas, vezes, _ = _bloco_passadas_cartao("ct_", a_cobrar, total, erros)
+        # data que já passou ganha a caixa "Já passou" (cobrança antiga cadastrada agora, pedido 16/10)
+        valores, datas, vezes, passou = _bloco_passadas_cartao("ct_", a_cobrar, total, erros, hoje=hoje)
 
     confirmado = True
     with st.container(key="sec_ct4"):
         _titulo_secao(4, "Resumo")
         if valores and all(datas):
             linhas = [f"<b>{data_br(d)}</b> · {formatar_brl(v)} · {texto_vezes(v, x)}"
-                      for d, v, x in sorted(zip(datas, valores, vezes))]
+                      + (" · <b>já passou</b>" if ok else "")
+                      for d, v, x, ok in sorted(zip(datas, valores, vezes, passou))]
             _info("<br>".join(linhas) + f"<br>A cobrança vai até <b>{nome_mes(max(datas))}</b>")
             confirmado = _bloco_conferencia(total, [ja_pago] + valores, "ct_")
             _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
@@ -1010,10 +1080,10 @@ def tela_cartao():
         if erros:
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
-            ordem = sorted(zip(datas, valores, vezes))
+            ordem = sorted(zip(datas, valores, vezes, passou))
             _salvar(TIPO_CARTAO, cliente, turma, treino, total,
-                    parcelas_cartao(ja_pago, hoje, [v for _, v, _ in ordem], [d for d, _, _ in ordem],
-                                    [x for _, _, x in ordem]), "ct_", obs_ct)
+                    parcelas_cartao(ja_pago, hoje, [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
+                                    [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem]), "ct_", obs_ct)
 
 
 # ── Cobrança híbrida (uma parte no Pix, outra no cartão) ──────────────────────
@@ -1052,7 +1122,7 @@ def tela_hibrido():
                 _info(f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(v_pix)}</b> &nbsp;+&nbsp; "
                       f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(v_cartao)}</b>")
 
-    data_entrada, valores_px, datas_px = None, [], []
+    data_entrada, valores_px, datas_px, pix_pagas = None, [], [], []
     with st.container(key="sec_hb3"):
         _titulo_secao(3, "Parte no Pix")
         entrada, ok_e = _valor("Valor de entrada", "hb_entrada", placeholder="0,00 se não teve entrada",
@@ -1072,6 +1142,7 @@ def tela_hibrido():
         else:
             valores_px, datas_px = _bloco_parcelas_pix("hb_px_", max(parte_pix - entrada, 0), total,
                                                        mes_mais(data_entrada or hoje, 1), erros)
+            pix_pagas = _caixas_ja_pagas("hb_px_", valores_px, datas_px, hoje)
 
     with st.container(key="sec_hb4"):
         _titulo_secao(4, "Parte no cartão")
@@ -1082,7 +1153,7 @@ def tela_hibrido():
     confirmado = True
     with st.container(key="sec_hb5"):
         _titulo_secao(5, "Resumo")
-        linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False)
+        linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False, pagas=pix_pagas)
         if linhas_px and valores_ct and all(datas_ct):
             linhas = [f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(entrada + sum(valores_px))}</b>"] + linhas_px
             linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(sum(valores_ct))}</b>")
@@ -1111,7 +1182,7 @@ def tela_hibrido():
             _salvar(TIPO_HIBRIDO, cliente, turma, treino, total,
                     parcelas_hibrido(entrada, data_entrada, valores_px, datas_px,
                                      [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
-                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje),
+                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje, pix_pagas),
                     "hb_", obs_hb)
 
 
@@ -1427,14 +1498,14 @@ def _dlg_receber(cid: str, n: int):
         if arquivo is not None:
             try:
                 with st.spinner("Enviando comprovante..."):
-                    link = enviar_comprovante(sec, arquivo.getvalue(), arquivo.name, c["treinamento"],
+                    link = enviar_comprovante(sec, arquivo.getvalue(), arquivo.name, (c["treinamentos"] or [""])[0],
                                               f"{c['cliente']} - {c['turma']} - {p['rotulo']}", quando)
             except Exception as e:
                 st.error(f"O comprovante não subiu ({e}). Nada foi marcado; tente de novo "
                          "ou confirme sem o comprovante.")
                 return
         pagamento = {"Pago em": quando, "Comprovante": link, "Marcado por": _usuario(),
-                     "Observação": obs.strip()}
+                     "Observação": obs.strip().upper()}
         try:
             if dividir:
                 da_parcela, nova = dividir_recebimento(p, v_outra, proximo_numero(c["parcelas"]), vezes,
@@ -1473,10 +1544,10 @@ def _dlg_ver(cid: str, n: int):
     k = f"_vp_{cid}_{n}"
     obs = st.text_input("Observação", value=p["observacao"], key=f"{k}_obs", max_chars=200,
                         placeholder="Ex.: pago em permuta")
-    if obs.strip() != p["observacao"] and st.button("Salvar observação", key=f"{k}_obs_ok", type="primary",
+    if obs.strip().upper() != p["observacao"].upper() and st.button("Salvar observação", key=f"{k}_obs_ok", type="primary",
                                                     icon=":material/check:", use_container_width=True):
         try:
-            _banco().atualizar_parcela(cid, n, {"Observação": obs.strip()})
+            _banco().atualizar_parcela(cid, n, {"Observação": obs.strip().upper()})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
@@ -1518,7 +1589,7 @@ def _dlg_alterar(cid: str, n: int):
     _cab_dialogo(c, p)
     k = f"_al_{cid}_{n}"
     nova_data = st.date_input("Data", value=p["vencimento"], format="DD/MM/YYYY", key=f"{k}_data")
-    novo_valor, ok_v = _valor("Valor", f"{k}_valor", placeholder=f"{p['valor']:.2f}".replace(".", ","),
+    novo_valor, ok_v = _valor("Valor", f"{k}_valor", placeholder=_num_br(p['valor']),
                               help="Em branco = continua o mesmo valor.")
     # Trocar a forma de UMA parcela é o que torna a cobrança híbrida (ex.: essa vai ser no cartão)
     forma = st.radio("Forma de pagamento", FORMAS, index=FORMAS.index(p["tipo"]), horizontal=True,
@@ -1533,7 +1604,7 @@ def _dlg_alterar(cid: str, n: int):
         if not ok_v or not nova_data or (novo_valor is not None and novo_valor <= 0):
             st.error("Confira a data e o valor.")
             return
-        campos = {"Vencimento": nova_data, "Observação": obs.strip()}
+        campos = {"Vencimento": nova_data, "Observação": obs.strip().upper()}
         if forma != p["tipo"]:
             campos["Forma"] = forma
         if forma == TIPO_CARTAO and p["n"] > 0:
@@ -1621,7 +1692,7 @@ def _dlg_obs(cid: str):
                        label_visibility="collapsed", placeholder="Escreva aqui…")
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
         try:
-            _banco().atualizar_cobranca(cid, {"Observações": txt.strip()})
+            _banco().atualizar_cobranca(cid, {"Observações": txt.strip().upper()})
         except Exception as e:
             st.error(f"Não consegui salvar: {e}")
             return
@@ -1637,24 +1708,25 @@ def _dlg_editar(cid: str):
         return
     k = f"_ed_{cid}"
     cliente = st.text_input("Nome do cliente", value=c["cliente"], key=f"{k}_cli").strip()
-    turma_txt = st.text_input("Turma", value=c["turma"], key=f"{k}_turma")
-    turma = normalizar_turma(turma_txt)
-    if turma:
-        _info(f"Turma <b>{turma}</b> · {TREINAMENTOS[turma[0]]}")
+    turma_txt = st.text_input("Turma", value=c["turma"], key=f"{k}_turma",
+                              help="Mais de uma turma: separe com vírgula. Ex.: L345, V12")
+    turmas = normalizar_turmas(turma_txt)
+    if turmas:
+        _info(" &nbsp;·&nbsp; ".join(f"Turma <b>{t}</b> · {TREINAMENTOS[t[0]]}" for t in turmas))
     else:
-        _erro_campo("Turma não reconhecida. Ex.: L345")
+        _erro_campo("Turma não reconhecida. Ex.: L345 (ou L345, V12)")
     cidade = st.text_input("Cidade da turma", value=c["cidade"], key=f"{k}_cidade", max_chars=40,
                            placeholder="Ex.: Lajeado, SCS…")
-    total, ok_t = _valor("Valor total", f"{k}_total",
-                         placeholder=f"{(c['valor_total'] or 0):.2f}".replace(".", ","),
+    total, ok_t = _valor("Valor total", f"{k}_total", placeholder=_num_br(c["valor_total"] or 0),
                          help="Em branco = continua o mesmo.")
     obs = st.text_area("Observações", value=c["observacoes"], key=f"{k}_obs", height=80)
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
-        if not cliente or not turma or not ok_t:
+        if not cliente or not turmas or not ok_t:
             st.error("Confira o nome, a turma e o valor.")
             return
-        campos = {"Cliente": cliente, "Turma": turma, "Treinamento": TREINAMENTOS[turma[0]],
-                  "Observações": obs.strip(), "Cidade": " ".join(cidade.split())}
+        campos = {"Cliente": cliente.upper(), "Turma": SEP_TURMAS_PLANILHA.join(turmas),
+                  "Treinamento": SEP_TURMAS_PLANILHA.join(treinamentos_das_turmas(turmas)),
+                  "Observações": obs.strip().upper(), "Cidade": " ".join(cidade.split()).upper()}
         if total:
             campos["Valor Total"] = total
         try:
@@ -1991,6 +2063,116 @@ if (!(P.history.state && P.history.state.voltarApp)) { P.history.pushState({volt
 """)
 
 
+# Campos de texto no celular (pedidos de 16/10), feito no NAVEGADOR porque o Streamlit só
+# recebe o que foi digitado depois do Enter:
+#   - VALOR (chave terminada em MARCA_VALOR): enquanto digita já mostra "1.500,00". O ponto do
+#     milhar entra sozinho e o ",00" fica sempre à vista; vírgula ou ponto pula para os centavos
+#     (e marca eles, para trocar digitando por cima). Teclado de números.
+#   - O resto dos campos de texto abre o teclado do celular em MAIÚSCULA (o estilo.css mostra em
+#     maiúscula e o Python grava em maiúscula). O nome de quem usa o app fica de fora.
+_JS_CAMPOS = r"""
+<script>
+const P = window.parent;
+if (!P.__camposVithall) {
+  P.__camposVithall = true;
+  const s = P.document.createElement("script");
+  s.textContent = "(" + instalar.toString() + ")();";   // roda na página de fora, onde estão os campos
+  P.document.head.appendChild(s);
+}
+function instalar() {
+  var MARCA = "__rs";
+  var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+  var mexendo = false;
+  function milhar(d) { return d.replace(/\B(?=(\d{3})+(?!\d))/g, "."); }
+  function trocar(el, v, pos) {
+    // o Streamlit (React) só fica sabendo do valor novo por um evento "input"
+    mexendo = true;
+    setter.call(el, v);
+    el.dispatchEvent(new Event("input", {bubbles: true}));
+    mexendo = false;
+    try { el.setSelectionRange(pos, pos); } catch (e) {}
+  }
+  function formatar(el) {
+    var v = el.value, cur = el.selectionStart == null ? v.length : el.selectionStart;
+    if (v.indexOf(",") < 0 && /^\d+\.\d{1,2}$/.test(v)) v = v.replace(".", ",");   // colou "1500.50"
+    var i = v.indexOf(",");
+    var inteiro = (i < 0 ? v : v.slice(0, i)).replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+    var cent = (i < 0 ? "" : v.slice(i + 1)).replace(/\D/g, "");
+    if (!inteiro && !/[1-9]/.test(cent)) { if (el.value !== "") trocar(el, "", 0); return; }
+    var noCent = i >= 0 && cur > i;
+    var antes = noCent ? v.slice(i + 1, cur).replace(/\D/g, "").length
+                       : v.slice(0, i < 0 ? cur : Math.min(cur, i)).replace(/\D/g, "").length;
+    if (cent.length > 2) cent = antes >= cent.length ? cent.slice(-2) : cent.slice(0, 2);
+    var ifmt = milhar(inteiro || "0");
+    var novo = ifmt + "," + (cent + "00").slice(0, 2);
+    var pos = 0;
+    if (noCent) pos = ifmt.length + 1 + Math.min(antes, 2);
+    else if (inteiro) {
+      // cursor logo depois do mesmo dígito em que estava (os pontos não contam)
+      for (var k = 0, d = 0, n = Math.min(antes, inteiro.length); k < ifmt.length && d < n; k++) {
+        if (/\d/.test(ifmt[k])) d++;
+        pos = k + 1;
+      }
+    }
+    if (novo !== el.value) trocar(el, novo, pos);
+  }
+  function antesDeDigitar(e) {
+    var el = e.target, v = el.value, i = v.indexOf(","), a = el.selectionStart, b = el.selectionEnd;
+    if (e.inputType === "insertText" && (e.data === "," || e.data === ".")) {
+      e.preventDefault();                        // vírgula ou ponto = ir para os centavos
+      if (i < 0) {
+        var dig = v.replace(/\D/g, "");
+        trocar(el, (dig ? milhar(dig.replace(/^0+(?=\d)/, "")) : "0") + ",00", 0);
+        i = el.value.indexOf(",");
+      }
+      el.setSelectionRange(i + 1, i + 3);        // centavos marcados: digitar troca eles
+    } else if (e.inputType === "deleteContentBackward" && a === b && i >= 0 && a === i + 1) {
+      e.preventDefault(); el.setSelectionRange(i, i);   // apagar a vírgula = só pular para antes dela
+    } else if (e.inputType === "deleteContentForward" && a === b && a === i) {
+      e.preventDefault(); el.setSelectionRange(i + 1, i + 1);
+    }
+  }
+  function cursorNoInteiro(el) {
+    // tocou no campo e o cursor caiu no fim (depois do ",00"): volta para antes da vírgula,
+    // senão o próximo número digitado iria para os centavos
+    setTimeout(function () {
+      var v = el.value, i = v.indexOf(",");
+      if (i >= 0 && v.slice(i + 1) === "00" && el.selectionStart === el.selectionEnd && el.selectionStart > i)
+        el.setSelectionRange(i, i);
+    }, 0);
+  }
+  function preparar() {
+    document.querySelectorAll('[class*="' + MARCA + '"] input:not([data-rs])').forEach(function (el) {
+      el.setAttribute("data-rs", "1");
+      el.setAttribute("inputmode", "decimal");
+      el.setAttribute("autocomplete", "off");
+      el.addEventListener("beforeinput", antesDeDigitar);
+      el.addEventListener("input", function () { if (!mexendo) formatar(el); });
+      el.addEventListener("focus", function () { cursorNoInteiro(el); });
+      el.addEventListener("click", function () { cursorNoInteiro(el); });
+    });
+    document.querySelectorAll('.stTextInput input:not([data-cap]):not([data-rs]), .stTextArea textarea:not([data-cap])')
+      .forEach(function (el) {
+        el.setAttribute("data-cap", "1");
+        if (!el.closest(".st-key-quem_novo, .st-key-cf_novo")) el.setAttribute("autocapitalize", "characters");
+      });
+  }
+  var agendado = false;
+  preparar();
+  new MutationObserver(function () {
+    if (agendado) return;
+    agendado = true;
+    requestAnimationFrame(function () { agendado = false; preparar(); });
+  }).observe(document.body, {childList: true, subtree: true});
+}
+</script>
+"""
+
+
+def _campos_do_celular():
+    _iframe_invisivel(_JS_CAMPOS)
+
+
 def _iframe_invisivel(html_js: str):
     """
     Roda um script num iframe de altura zero. `st.components.v1.html` foi
@@ -2030,4 +2212,5 @@ if st.session_state.tela not in telas:
 if _identificado():
     telas[st.session_state.tela]()
     _voltar_do_celular()
+    _campos_do_celular()
     _renovar_cookie_do_aparelho()

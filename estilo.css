@@ -88,6 +88,12 @@ header[data-testid="stHeader"] { display: none; }
 .cx-dica   { color: var(--apoio); font-size: .82rem; margin: -.5rem 0 .2rem; line-height: 1.35; }
 .cx-dica b { color: var(--marca-2); font-weight: 600; }
 .cx-divisa { border-top: 1px solid var(--linha); margin: 10px 0 2px; }
+
+/* Tudo que se digita aparece em MAIÚSCULA (pedido 16/10; o Python também grava em maiúscula).
+   O texto de exemplo e o nome de quem usa o app ficam como estão. */
+.stTextInput input, .stTextArea textarea { text-transform: uppercase; }
+.stTextInput input::placeholder, .stTextArea textarea::placeholder { text-transform: none; }
+.st-key-quem_novo input, .st-key-cf_novo input { text-transform: none; }
 .cx-vazio  { text-align: center; color: var(--apoio); padding: 28px 12px; font-size: .95rem; }
 
 /* ── Tela inicial e escolha Pix/Cartão ───────────────────────────────────── */
