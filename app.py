@@ -49,7 +49,7 @@ import feriados
 import notifier
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
                     administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
-                    MAX_VEZES_CARTAO, cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
+                    cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
                     SEP_TURMAS_PLANILHA, normalizar_turmas, treinamentos_das_turmas,
@@ -87,7 +87,6 @@ SVG_HIBRIDO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strok
 SVG_SETA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
             'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>')
 
-MAX_DATAS_CARTAO = 20   # em quantas vezes dá para dividir a passada no cartão
 
 ICONE_TIPO = {TIPO_PIX: ":material/qr_code_2:", TIPO_CARTAO: ":material/credit_card:"}
 # Classe de cor de cada situação (mesma paleta na parcela e na cobrança)
@@ -315,6 +314,27 @@ def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
         _erro_campo("Valor inválido. Ex.: 1500 ou 1.500,50")
         return None, False
     return v, True
+
+
+def _valores_automaticos(chaves: list, restante: float):
+    """
+    Campos de valor de cada parcela (pedido 17/10): já vêm PREENCHIDOS com a parte de cada uma
+    (10x de R$ 1.000 = R$ 100,00 em cada). Quem a pessoa mudou fica como ela escreveu; os outros
+    dividem o que sobrou, então o total continua fechando. Apagar um campo devolve ele à conta.
+    Roda ANTES de desenhar os campos (o Streamlit só deixa mudar o campo antes de ele aparecer).
+    """
+    ss = st.session_state
+    mexidos, digitados = [], []
+    for chave in chaves:
+        k = chave + MARCA_VALOR
+        atual = str(ss.get(k, "") or "")
+        mexeu = bool(atual.strip()) and atual != ss.get(f"_auto_{k}")
+        mexidos.append(mexeu)
+        digitados.append(valor_para_float(atual) if mexeu else None)
+    for chave, mexeu, parte in zip(chaves, mexidos, resolver_valores(restante, digitados)):
+        if not mexeu:
+            k = chave + MARCA_VALOR
+            ss[k] = ss[f"_auto_{k}"] = _num_br(parte) if restante > 0 and parte > 0 else ""
 
 
 def _limpar_campos(prefixo: str):
@@ -711,7 +731,7 @@ def tela_nova():
         _limpar_campos("px_")
         _ir("pix")
     if _cartao_inicio("hm_cartao", "tq_cartao", "Cobrança cartão", "claro", SVG_CARTAO,
-                      "Cobrança cartão", f"Até {MAX_DATAS_CARTAO} datas para passar o cartão"):
+                      "Cobrança cartão", "Uma ou mais datas para passar o cartão"):
         _limpar_campos("ct_")
         _ir("cartao")
     if _cartao_inicio("hm_hibrido", "tq_hibrido", "Cobrança híbrida", "claro", SVG_HIBRIDO,
@@ -832,7 +852,7 @@ def _bloco_parcelas_pix(prefixo: str, restante: float, total, primeira_padrao: d
     """Quantas parcelas, o valor e o vencimento de cada uma (Contínuo ou Parcial).
     Devolve (valores, datas) e acrescenta em `erros` o que estiver faltando."""
     valores, datas = [], []
-    n = st.number_input("Número de parcelas", min_value=1, max_value=60, value=None, step=1,
+    n = st.number_input("Número de parcelas", min_value=1, value=None, step=1,
                         key=f"{prefixo}n", placeholder="Ex.: 10")
     modo_valor = st.radio("Valor das parcelas", ["Contínuo", "Parcial"], horizontal=True,
                           key=f"{prefixo}mv", captions=["igual todo mês", "muda por mês"])
@@ -857,6 +877,8 @@ def _bloco_parcelas_pix(prefixo: str, restante: float, total, primeira_padrao: d
 
     if modo_valor == "Parcial" or modo_data == "Parcial":
         st.markdown("<div class='px-lista'>Parcela por parcela</div>", unsafe_allow_html=True)
+        if modo_valor == "Parcial":
+            _valores_automaticos([f"{prefixo}v{k}_{n}" for k in range(n)], restante)
         digitados = []
         for k in range(n):
             with st.container(key=f"{prefixo}linha_{k}"):
@@ -929,12 +951,13 @@ def _resumo_pix(entrada: float, data_entrada, valores: list, datas: list, hoje: 
 def _bloco_passadas_cartao(prefixo: str, a_cobrar: float, total, erros: list, hoje: date | None = None):
     """
     Quantas vezes o cartão passa e, em cada uma, a data, o valor e em quantas parcelas.
-    Devolve (valores, datas, vezes, ja_passou). Com `hoje` (só a tela híbrida manda), a
-    passada com data de hoje ou anterior ganha a caixa "Já passou", que vem marcada.
+    Devolve (valores, datas, vezes, ja_passou). Com `hoje`, a passada com data de hoje ou
+    anterior ganha a caixa "Já passou", que vem marcada. O valor de cada passada já vem
+    preenchido com a sua parte do que falta (ver _valores_automaticos).
     """
     valores, datas, vezes, ja_passou = [], [], [], []
-    n = st.number_input("Quantas vezes você vai passar o cartão?", min_value=1, max_value=MAX_DATAS_CARTAO,
-                        value=None, step=1, key=f"{prefixo}n", placeholder=f"De 1 a {MAX_DATAS_CARTAO}",
+    n = st.number_input("Quantas vezes você vai passar o cartão?", min_value=1,
+                        value=None, step=1, key=f"{prefixo}n", placeholder="Ex.: 3",
                         help="Cada vez é um dia em que você passa o cartão do cliente. "
                              "Em cada uma você diz o valor e em quantas parcelas ela foi dividida.")
     if not n:
@@ -942,6 +965,7 @@ def _bloco_passadas_cartao(prefixo: str, a_cobrar: float, total, erros: list, ho
         return valores, datas, vezes, ja_passou
 
     n = int(n)
+    _valores_automaticos([f"{prefixo}v{k}" for k in range(n)], a_cobrar)
     digitados = []
     for k in range(n):
         with st.container(key=f"{prefixo}linha_{k}"):
@@ -955,7 +979,7 @@ def _bloco_passadas_cartao(prefixo: str, a_cobrar: float, total, erros: list, ho
                     erros.append("Tem valor digitado errado.")
                 digitados.append(v)
             vezes.append(int(st.number_input(
-                f"Parcelado em quantas vezes ({k + 1}ª passada)", min_value=1, max_value=MAX_VEZES_CARTAO,
+                f"Parcelado em quantas vezes ({k + 1}ª passada)", min_value=1,
                 value=1, step=1, key=f"{prefixo}x{k}",
                 help="Em quantas parcelas essa passada é dividida no cartão. 1 = à vista.")))
             ja_passou.append(bool(
@@ -1459,7 +1483,7 @@ def _dlg_receber(cid: str, n: int):
                            format="DD/MM/YYYY", key=f"{k}_data")
     vezes = p["vezes"]
     if cartao:
-        vezes = int(st.number_input("Passou em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+        vezes = int(st.number_input("Passou em quantas vezes", min_value=1,
                                     value=p["vezes"], step=1, key=f"{k}_vezes"))
         if not st.session_state.get(f"{k}_hib"):
             # HTML, não st.caption: dois "R$" na mesma linha viram fórmula ($...$) no markdown do Streamlit
@@ -1472,7 +1496,7 @@ def _dlg_receber(cid: str, n: int):
     if dividir:
         v_outra, ok_o = _valor(f"Quanto foi no {outra}", f"{k}_outra")
         if not cartao:
-            vezes = int(st.number_input("No cartão, em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+            vezes = int(st.number_input("No cartão, em quantas vezes", min_value=1,
                                         value=1, step=1, key=f"{k}_hvezes"))
         divisao_ok = bool(ok_o and v_outra and 0 < centavos(v_outra) < centavos(p["valor"]))
         if divisao_ok:
@@ -1596,7 +1620,7 @@ def _dlg_alterar(cid: str, n: int):
                      key=f"{k}_forma")
     vezes = p["vezes"]
     if forma == TIPO_CARTAO and p["n"] > 0:
-        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1,
                                     value=p["vezes"], step=1, key=f"{k}_vezes"))
     obs = st.text_input("Observação (opcional)", value=p["observacao"], key=f"{k}_obs", max_chars=200,
                         placeholder="Ex.: combinou pagar em permuta")
@@ -1662,7 +1686,7 @@ def _dlg_adicionar(cid: str):
     valor, ok_v = _valor("Valor", f"{k}_valor")
     vezes = 1
     if forma == TIPO_CARTAO:
-        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1, max_value=MAX_VEZES_CARTAO,
+        vezes = int(st.number_input("Parcelado em quantas vezes", min_value=1,
                                     value=1, step=1, key=f"{k}_vezes"))
     if st.button("Adicionar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/add:"):
         if not data or not ok_v or not valor:

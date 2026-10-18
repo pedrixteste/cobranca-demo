@@ -278,9 +278,6 @@ def parcelas_pix(entrada: float, data_entrada: date | None, valores: list[float]
     return linhas
 
 
-MAX_VEZES_CARTAO = 24
-
-
 def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
                     datas: list[date], vezes: list[int] | None = None,
                     ja_passou: list[bool] | None = None) -> list[dict]:
@@ -408,7 +405,7 @@ def forma_da_parcela(gravada, tipo_cobranca: str) -> str:
 
 def _vezes(v) -> int:
     try:
-        return min(max(int(float(_txt(v) or 1)), 1), MAX_VEZES_CARTAO)
+        return max(int(float(_txt(v) or 1)), 1)   # sem limite de vezes (pedido 17/10)
     except ValueError:
         return 1
 

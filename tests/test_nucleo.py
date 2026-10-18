@@ -274,6 +274,10 @@ class CartaoParcelado(unittest.TestCase):
                                 {**parc("a1", 2, "05/06/2027", "4000,00"), "Vezes no cartão": ""},
                                 {**parc("a1", 3, "05/07/2027", "100,00"), "Vezes no cartão": "abc"}], HOJE)[0]
         self.assertEqual([p["vezes"] for p in c["parcelas"]], [8, 1, 1])
+        # sem limite de vezes (pedido 17/10)
+        c = n.montar_cobrancas([cob(tipo="Cartão")],
+                               [{**parc("a1", 1, "05/10/2026", "3600,00"), "Vezes no cartão": "36"}], HOJE)[0]
+        self.assertEqual(c["parcelas"][0]["vezes"], 36)
 
     def test_aviso_do_telegram_diz_em_quantas_vezes(self):
         cobs = n.montar_cobrancas([cob(tipo="Cartão")],
