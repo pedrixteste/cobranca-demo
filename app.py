@@ -52,7 +52,7 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
-                    TIPO_PERMUTA, parcelas_permuta, permutas_do_cliente,
+                    TIPO_PERMUTA, TIPO_CREDITO, parcelas_permuta, permutas_do_cliente,
                     SEP_TURMAS_PLANILHA, normalizar_turmas, treinamentos_das_turmas,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
@@ -1221,27 +1221,69 @@ def tela_hibrido():
 
 # ── Permuta (treinamento em troca de produtos ou serviços) ────────────────────
 # A Vithall ganha um SALDO com a empresa do cliente e vai pegando produtos até zerar.
-# Cada retirada = produto + data + quanto desconta do saldo (regras em nucleo.py).
+# Cada VALOR que entra tem a sua data (a pessoa pode fechar outra permuta meses depois: é
+# só tocar no "+" dos valores) e cada RETIRADA = produto + data + quanto desconta do saldo.
 
-def _mais_uma_retirada(prefixo: str):
-    st.session_state[f"{prefixo}n_ret"] = st.session_state.get(f"{prefixo}n_ret", 1) + 1
+_CAMPOS_VALOR = ("cdata_", "cval_")            # cada valor da permuta: data e valor
+_CAMPOS_RETIRADA = ("prod_", "rdata_", "rval_")  # cada retirada: produto, data e valor
 
 
-def _tirar_retirada(prefixo: str, i: int):
-    """Tira a i-ésima retirada e sobe as de baixo (roda antes da tela, por isso pode mexer nos campos)."""
+def _mais_uma_linha(prefixo: str, contador: str):
+    st.session_state[f"{prefixo}{contador}"] = st.session_state.get(f"{prefixo}{contador}", 1) + 1
+
+
+def _tirar_linha(prefixo: str, contador: str, campos: tuple, i: int):
+    """Tira a i-ésima linha e sobe as de baixo (roda antes da tela, por isso pode mexer nos campos)."""
     ss = st.session_state
-    n = ss.get(f"{prefixo}n_ret", 1)
-    campos = (f"{prefixo}prod_", f"{prefixo}rdata_", f"{prefixo}rval_")
+    n = ss.get(f"{prefixo}{contador}", 1)
+    chave = lambda campo, j: f"{prefixo}{campo}{j}" + (MARCA_VALOR if campo.endswith("val_") else "")
     for j in range(i, n - 1):
-        for c in campos:
-            fim = MARCA_VALOR if c.endswith("rval_") else ""
-            if f"{c}{j + 1}{fim}" in ss:
-                ss[f"{c}{j}{fim}"] = ss[f"{c}{j + 1}{fim}"]
+        for campo in campos:
+            if chave(campo, j + 1) in ss:
+                ss[chave(campo, j)] = ss[chave(campo, j + 1)]
             else:
-                ss.pop(f"{c}{j}{fim}", None)
-    for c in campos:
-        ss.pop(f"{c}{n - 1}{MARCA_VALOR if c.endswith('rval_') else ''}", None)
-    ss[f"{prefixo}n_ret"] = max(n - 1, 1)
+                ss.pop(chave(campo, j), None)
+    for campo in campos:
+        ss.pop(chave(campo, n - 1), None)
+    ss[f"{prefixo}{contador}"] = max(n - 1, 1)
+
+
+def _bloco_valores_permuta(prefixo: str, hoje: date, erros: list) -> list:
+    """
+    Cada valor de permuta que entrou, com a data dele, e o "+" para mais um (a mesma pessoa pode
+    fechar outra permuta depois). Devolve [(data, valor)].
+    """
+    valores = []
+    n = st.session_state.get(f"{prefixo}n_cred", 1)
+    for i in range(n):
+        with st.container(key=f"{prefixo}cred_{i}"):
+            if n > 1:
+                c0, cx = st.columns([6, 1], vertical_alignment="center")
+                with c0:
+                    st.markdown(f"<div class='px-lista'>{i + 1}º valor</div>", unsafe_allow_html=True)
+                with cx:
+                    st.button("Tirar", key=f"{prefixo}tirar_cred_{i}", icon=":material/close:",
+                              help="Tirar este valor", on_click=_tirar_linha,
+                              args=(prefixo, "n_cred", _CAMPOS_VALOR, i), use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                valor, ok = _valor("Valor da permuta", f"{prefixo}cval_{i}",
+                                   help="Quanto essa permuta vale em produtos ou serviços da empresa do cliente.")
+            with c2:
+                data = st.date_input("Data da permuta", value=hoje, format="DD/MM/YYYY", key=f"{prefixo}cdata_{i}",
+                                     help="O dia em que vocês fecharam essa permuta.")
+        if not ok:
+            erros.append("Tem valor digitado errado.")
+        elif valor and data:
+            valores.append((data, valor))
+        elif valor:
+            erros.append(f"Falta a data do {i + 1}º valor.")
+    st.button("Adicionar outro valor", key=f"{prefixo}mais_cred", icon=":material/add:", type="tertiary",
+              on_click=_mais_uma_linha, args=(prefixo, "n_cred"),
+              help="Fechou mais uma permuta com essa pessoa? Põe o valor novo com a data dele.")
+    if not valores:
+        erros.append("Falta o valor da permuta.")
+    return valores
 
 
 def _bloco_retiradas(prefixo: str, hoje: date, erros: list) -> list:
@@ -1261,7 +1303,8 @@ def _bloco_retiradas(prefixo: str, hoje: date, erros: list) -> list:
                                         placeholder="Ex.: 10 camisetas, 2 jantares…")
             with c2:
                 st.button("Tirar", key=f"{prefixo}tirar_ret_{i}", icon=":material/close:", help="Tirar esta retirada",
-                          on_click=_tirar_retirada, args=(prefixo, i), use_container_width=True)
+                          on_click=_tirar_linha, args=(prefixo, "n_ret", _CAMPOS_RETIRADA, i),
+                          use_container_width=True)
             c3, c4 = st.columns(2)
             with c3:
                 data = st.date_input("Data", value=hoje, format="DD/MM/YYYY", key=f"{prefixo}rdata_{i}")
@@ -1280,7 +1323,7 @@ def _bloco_retiradas(prefixo: str, hoje: date, erros: list) -> list:
             if produto.strip() and valor and data:
                 retiradas.append((" ".join(produto.split()).upper(), data, valor))
     st.button("Adicionar retirada", key=f"{prefixo}mais_ret", icon=":material/add:", type="tertiary",
-              on_click=_mais_uma_retirada, args=(prefixo,))
+              on_click=_mais_uma_linha, args=(prefixo, "n_ret"))
     return retiradas
 
 
@@ -1299,19 +1342,20 @@ def tela_permuta():
         cliente, turma, treino, erros = _bloco_cliente("pm_")
         outras = permutas_do_cliente(_cobrancas() or [], cliente)
         if outras:
-            saldo = sum(max(c["saldo"], 0) for c in outras)
-            st.markdown(f"<div class='cx-dica'>{_e(cliente.upper())} já tem <b>{len(outras)} permuta"
-                        f"{'s' if len(outras) > 1 else ''}</b> (saldo de {formatar_brl(saldo)}). "
-                        f"Esta vai ser a {len(outras) + 1}ª, com saldo próprio.</div>", unsafe_allow_html=True)
+            ja = outras[0]
+            st.markdown(f"<div class='cx-dica'>{_e(cliente.upper())} já tem uma permuta (saldo de "
+                        f"{formatar_brl(max(ja['saldo'], 0))}). Para somar uma permuta nova a ela, abra a dela e "
+                        f"toque em <b>Adicionar valor</b>.</div>", unsafe_allow_html=True)
+            if st.button(f"Abrir a permuta de {ja['cliente']}", key="pm_abrir_existente",
+                         icon=":material/open_in_new:", type="tertiary"):
+                _abrir_cobranca(ja["id"], "nova")
 
     with st.container(key="sec_pm2"):
         _titulo_secao(2, "Valores")
-        total, ok_t = _valor("Valor total da permuta", "pm_total",
-                             help="O saldo que vocês ganham para retirar em produtos ou serviços da empresa do cliente.")
-        if not ok_t:
-            erros.append("Tem valor digitado errado.")
-        if total is None or total <= 0:
-            erros.append("Falta o valor total da permuta.")
+        creditos = _bloco_valores_permuta("pm_", hoje, erros)
+        total = sum(v for _, v in creditos)
+        if len(creditos) > 1:
+            _info(f"Total da permuta: <b>{formatar_brl(total)}</b>")
 
     with st.container(key="sec_pm3"):
         _titulo_secao(3, "Retiradas")
@@ -1326,15 +1370,19 @@ def tela_permuta():
         _titulo_secao(4, "Resumo")
         if total:
             linhas = [f"Permuta de <b>{formatar_brl(total)}</b>"]
+            if len(creditos) > 1:
+                linhas += [f"{data_br(d)} · valor de {formatar_brl(v)}" for d, v in sorted(creditos)]
+            else:
+                linhas[0] += f" em {data_br(creditos[0][0])}"
             for produto, d, v in sorted(retiradas, key=lambda r: r[1]):
-                linhas.append(f"{data_br(d)} · {_e(produto)} · {formatar_brl(v)}")
+                linhas.append(f"{data_br(d)} · retirada · {_e(produto)} · {formatar_brl(v)}")
             if not retiradas:
                 linhas.append("Nenhuma retirada ainda")
             _info("<br>".join(linhas))
             _info("Permuta não entra no Recebido nem no A receber, e o Telegram não avisa: ela tem o "
                   "próprio saldo.", "cx-nota")
         else:
-            st.caption("Preencha o valor total da permuta para ver o resumo.")
+            st.caption("Preencha o valor da permuta para ver o resumo.")
 
     obs_pm = st.text_input("Observação (opcional)", key="pm_obs", max_chars=300,
                            placeholder="Ex.: troca por produtos da loja")
@@ -1345,8 +1393,8 @@ def tela_permuta():
         if erros:
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
-            _salvar(TIPO_PERMUTA, cliente, turma, treino, total, parcelas_permuta(retiradas, _usuario()),
-                    "pm_", obs_pm)
+            _salvar(TIPO_PERMUTA, cliente, turma, treino, total,
+                    parcelas_permuta(retiradas, _usuario(), creditos), "pm_", obs_pm)
 
 
 # ── Relatório ─────────────────────────────────────────────────────────────────
@@ -1402,7 +1450,7 @@ def _html_cliente(c: dict, hoje: date) -> str:
         valor = (f"saldo <b>{formatar_brl(c['saldo'])}</b>" if not quitado
                  else f"retirado <b>{formatar_brl(c['pago'])}</b>")
         estado = ("" if quitado else
-                  f"<div class='cc-est'>Retirado {formatar_brl(c['pago'])} de {formatar_brl(c['valor_total'] or 0)}</div>")
+                  f"<div class='cc-est'>Retirado {formatar_brl(c['pago'])} de {formatar_brl(c['total_permuta'])}</div>")
     else:
         valor = (f"pago <b>{formatar_brl(c['pago'])}</b>" if quitado
                  else f"falta <b>{formatar_brl(c['falta'])}</b>")
@@ -1900,8 +1948,13 @@ def _dlg_editar(cid: str):
         _erro_campo("Turma não reconhecida. Ex.: L345 (ou L345, V12)")
     cidade = st.text_input("Cidade da turma", value=c["cidade"], key=f"{k}_cidade", max_chars=40,
                            placeholder="Ex.: Lajeado, SCS…")
-    total, ok_t = _valor("Valor total", f"{k}_total", placeholder=_num_br(c["valor_total"] or 0),
-                         help="Em branco = continua o mesmo.")
+    if c["permuta"]:   # o total da permuta é a soma dos valores, que mudam na ficha
+        total, ok_t = None, True
+        _info("O total da permuta é a soma dos valores: para mudar, use <b>Adicionar valor</b> ou "
+              "<b>Alterar</b> na ficha.", "cx-nota")
+    else:
+        total, ok_t = _valor("Valor total", f"{k}_total", placeholder=_num_br(c["valor_total"] or 0),
+                             help="Em branco = continua o mesmo.")
     obs = st.text_area("Observações", value=c["observacoes"], key=f"{k}_obs", height=80)
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
         if not cliente or not turmas or not ok_t:
@@ -2035,22 +2088,32 @@ def _botoes_editar_excluir(c: dict):
 
 # ── Ficha da permuta ──────────────────────────────────────────────────────────
 
+def _bloco_data(d) -> str:
+    return (f"<div class='pc-data'><span class='pc-mes'>{MESES_ABREV[d.month - 1]} {d.year}</span>"
+            f"<span class='pc-dia'>{d.day}</span><span class='pc-sem'>{DIAS_SEMANA[d.weekday()]}</span></div>"
+            if d else "<div class='pc-data'><span class='pc-dia'>?</span></div>")
+
+
 def _html_retirada(p: dict) -> str:
-    d = p["vencimento"]
-    bloco = (f"<div class='pc-data'><span class='pc-mes'>{MESES_ABREV[d.month - 1]} {d.year}</span>"
-             f"<span class='pc-dia'>{d.day}</span><span class='pc-sem'>{DIAS_SEMANA[d.weekday()]}</span></div>"
-             if d else "<div class='pc-data'><span class='pc-dia'>?</span></div>")
     quem = f"<br><span class='pc-quem'>{_e(p['marcado_por'])} registrou</span>" if p["marcado_por"] else ""
     obs = f"<div class='pc-obs'>{_e(p['observacao'])}</div>" if p["observacao"] else ""
-    return (f"<div class='pc c-ret'>{bloco}<div class='pc-corpo'>"
+    return (f"<div class='pc c-ret'>{_bloco_data(p['vencimento'])}<div class='pc-corpo'>"
             f"<div class='pc-nome'>{_e(p['produto'] or 'Retirada')}</div>"
             f"<div class='pc-rot'>Retirada{quem}</div>"
             f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div>{obs}</div></div>")
 
 
+def _html_valor_permuta(d, valor: float, quem: str = "") -> str:
+    quem = f"<br><span class='pc-quem'>{_e(quem)} registrou</span>" if quem else ""
+    return (f"<div class='pc c-cred'>{_bloco_data(d)}<div class='pc-corpo'>"
+            f"<div class='pc-nome'>Valor da permuta</div>"
+            f"<div class='pc-rot'>Entrou no saldo{quem}</div>"
+            f"<div class='pc-valor'>+ {formatar_brl(valor)}</div></div></div>")
+
+
 def _ficha_permuta(c: dict):
-    """Saldo da permuta, o que já foi retirado e as outras permutas do mesmo cliente."""
-    total = c["valor_total"] or 0
+    """Total (soma dos valores), retirado e saldo; cada valor com a data e cada retirada."""
+    total = c["total_permuta"]
     retirado, saldo = c["pago"], c["saldo"]
     pct = min(int(round(100 * retirado / total)), 100) if total else 0
     quem = ""
@@ -2060,7 +2123,7 @@ def _ficha_permuta(c: dict):
         quem = f"<div class='fc-quem'>Cadastrada{por}{em}</div>"
     aviso = (f"<div class='fc-aviso'>As retiradas passam do total da permuta em {formatar_brl(-saldo)}.</div>"
              if saldo < -0.005 else "")
-    n_ret = len(c["parcelas"])
+    n_ret = len(c["retiradas"])
     st.markdown(
         f"<div class='fc {'c-ok' if saldo > 0.005 else 'c-neutro'}'><div class='fc-topo'>{_chip_situacao(c)}"
         f"<span>{n_ret} retirada{'s' if n_ret != 1 else ''}</span></div>"
@@ -2073,10 +2136,27 @@ def _ficha_permuta(c: dict):
     )
     _bloco_obs_ficha(c)
 
+    # cada valor que entrou, com a data (a pessoa pode fechar outra permuta depois)
+    st.markdown("<div class='fc-grupo'>Valores da permuta</div>", unsafe_allow_html=True)
+    if c["creditos"]:
+        for p in sorted(c["creditos"], key=lambda p: (p["vencimento"] or date.min, p["n"])):
+            with st.container(key=f"pc_cr_{c['id']}_{p['n']}"):
+                st.markdown(_html_valor_permuta(p["vencimento"], p["valor"], p["marcado_por"]),
+                            unsafe_allow_html=True)
+                if st.button("Alterar", key=f"cr_alt_{c['id']}_{p['n']}", icon=":material/edit:",
+                             use_container_width=True):
+                    _dlg_valor_permuta(c["id"], p["n"])
+    else:   # permuta das primeiras versões: só o valor total, sem linha própria
+        with st.container(key=f"pc_cr_{c['id']}_base"):
+            st.markdown(_html_valor_permuta(c["criada_em"], total, c["criada_por"]), unsafe_allow_html=True)
+    if st.button("Adicionar valor", key="fc_add_cred", icon=":material/add:", use_container_width=True,
+                 help="Fechou mais uma permuta com essa pessoa? Põe o valor novo com a data dele."):
+        _dlg_valor_permuta(c["id"])
+
     st.markdown("<div class='fc-grupo'>Retiradas</div>", unsafe_allow_html=True)
-    if not c["parcelas"]:
+    if not c["retiradas"]:
         st.markdown("<div class='cx-vazio'>Nada retirado ainda.</div>", unsafe_allow_html=True)
-    for p in sorted(c["parcelas"], key=lambda p: (p["vencimento"] or date.min, p["n"])):
+    for p in sorted(c["retiradas"], key=lambda p: (p["vencimento"] or date.min, p["n"])):
         with st.container(key=f"pc_rt_{c['id']}_{p['n']}"):
             st.markdown(_html_retirada(p), unsafe_allow_html=True)
             if st.button("Alterar", key=f"rt_alt_{c['id']}_{p['n']}", icon=":material/edit:",
@@ -2086,26 +2166,90 @@ def _ficha_permuta(c: dict):
                  type="primary" if saldo > 0.005 else "secondary"):
         _dlg_retirada(c["id"])
 
-    # o mesmo cliente pode ter feito outras permutas (ex.: comprou outro treinamento 2 meses depois)
+    # permuta do mesmo cliente cadastrada à parte (antes do "+" dos valores existir)
     outras = permutas_do_cliente(_cobrancas() or [], c["cliente"], menos=c["id"])
-    st.markdown(f"<div class='fc-grupo'>Outras permutas de {_e(c['cliente'])}</div>", unsafe_allow_html=True)
     if outras:
+        st.markdown(f"<div class='fc-grupo'>Outras permutas de {_e(c['cliente'])}</div>", unsafe_allow_html=True)
         soma = sum(max(x["saldo"], 0) for x in outras) + max(saldo, 0)
         _info(f"Somando as {len(outras) + 1} permutas: <b>{formatar_brl(soma)}</b> de saldo para retirar.")
         for x in sorted(outras, key=lambda x: x["criada_em"] or date.min):
             if _cartao_toque(f"cc_{x['id']}", f"tq_{x['id']}", f"Abrir permuta de {x['cliente']}",
                              _html_cliente(x, _hoje())):
                 _abrir_cobranca(x["id"], st.session_state.get("cob_volta", "relatorio"))
-    else:
-        st.markdown("<div class='cx-dica' style='margin:0 0 .4rem'>Nenhuma outra por enquanto.</div>",
-                    unsafe_allow_html=True)
-    if st.button(f"Nova permuta para {c['cliente']}", key="fc_nova_perm", icon=":material/add_circle:",
-                 use_container_width=True):
-        _limpar_campos("pm_")
-        st.session_state["pm_cliente"] = c["cliente"]
-        st.session_state["pm_cidade"] = c["cidade"]
-        _ir("permuta")
     _botoes_editar_excluir(c)
+
+
+@st.dialog("Valor da permuta")
+def _dlg_valor_permuta(cid: str, n: int | None = None):
+    """Valor novo da permuta (n=None: a pessoa fechou outra permuta) ou alterar/remover um que existe."""
+    c = _cobranca(cid)
+    p = next((x for x in c["creditos"] if x["n"] == n), None) if (c and n is not None) else None
+    if not c or (n is not None and not p):
+        st.error("Esse valor não existe mais. Feche e atualize.")
+        return
+    total = c["total_permuta"]
+    st.markdown(f"<div class='dl-cab'><b>{_e(c['cliente'])}</b><span>Total hoje: {formatar_brl(total)} · "
+                f"saldo {formatar_brl(max(c['saldo'], 0))}</span></div>", unsafe_allow_html=True)
+    k = f"_cr_{cid}_{n}"
+    valor, ok_v = _valor("Valor da permuta", f"{k}_valor", placeholder=_num_br(p["valor"]) if p else "0,00",
+                         help="Em branco = continua o mesmo." if p else "Quanto essa nova permuta vale.")
+    data = st.date_input("Data da permuta", value=(p["vencimento"] if p else _hoje()), format="DD/MM/YYYY",
+                         key=f"{k}_data", help="O dia em que vocês fecharam essa permuta.")
+    if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
+        if not data or not ok_v or (p is None and not valor) or (valor is not None and valor <= 0):
+            st.error("Preencha o valor e a data.")
+            return
+        b = _banco()
+        try:
+            if p:
+                campos = {"Vencimento": data, "Pago em": data, **({"Valor": valor} if valor else {})}
+                b.atualizar_parcela(cid, n, campos)
+                novo_total = total - p["valor"] + (valor or p["valor"])
+            else:
+                proximo = proximo_numero(c["parcelas"])
+                linha = {"Status": STATUS_PAGA, "Forma": TIPO_CREDITO, "Marcado por": _usuario()}
+                if not c["creditos"] and total > 0:
+                    # permuta antiga (só com o total): o total vira o 1º valor, na data do cadastro
+                    base = c["criada_em"] or _hoje()
+                    b.adicionar_parcela(cid, {**linha, "Nº": proximo, "Vencimento": base, "Pago em": base,
+                                              "Valor": total, "Marcado por": c["criada_por"]})
+                    proximo += 1
+                b.adicionar_parcela(cid, {**linha, "Nº": proximo, "Vencimento": data, "Pago em": data,
+                                          "Valor": valor})
+                novo_total = total + valor
+            b.atualizar_cobranca(cid, {"Valor Total": novo_total})   # "Valor Total" acompanha a soma
+        except Exception as e:
+            st.error(f"Não consegui salvar: {e}")
+            return
+        _invalidar()
+        _flash("Valor da permuta salvo")
+        st.rerun()
+    if p:
+        st.markdown("<div class='cx-divisa'></div>", unsafe_allow_html=True)
+        if not st.session_state.get(f"{k}_rm"):
+            if st.button("Remover este valor", key=f"{k}_remover", type="tertiary", icon=":material/delete:"):
+                st.session_state[f"{k}_rm"] = True
+                st.rerun(scope="fragment")
+        else:
+            _info(f"Remover o valor de {formatar_brl(p['valor'])} ({data_br(p['vencimento'])})? "
+                  "Ele sai do total e do saldo.", "cx-perigo")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Não", key=f"{k}_rm_nao", use_container_width=True):
+                    st.session_state[f"{k}_rm"] = False
+                    st.rerun(scope="fragment")
+            with c2:
+                if st.button("Sim, remover", key=f"{k}_rm_sim", use_container_width=True):
+                    st.session_state[f"{k}_rm"] = False
+                    try:
+                        _banco().remover_parcela(cid, n)
+                        _banco().atualizar_cobranca(cid, {"Valor Total": total - p["valor"]})
+                    except Exception as e:
+                        st.error(f"Não consegui remover: {e}")
+                        return
+                    _invalidar()
+                    _flash("Valor removido")
+                    st.rerun()
 
 
 @st.dialog("Retirada")

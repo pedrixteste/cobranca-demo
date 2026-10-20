@@ -16,6 +16,10 @@ Permuta (pedido 20/10): o cliente paga o treinamento com produtos ou serviços d
 empresa dele. A cobrança Permuta guarda em "Valor Total" o saldo que a Vithall
 ganhou com essa empresa, e cada linha de _Parcelas é uma RETIRADA (o que já foi
 pegado: Produto, data e quanto desconta do saldo). Saldo = total - retiradas.
+Desde 20/10 (2º pedido) a mesma permuta pode receber VÁRIOS valores, cada um com a
+sua data (a pessoa fechou outra permuta depois): são as linhas com Forma "Crédito
+de permuta", e o total passa a ser a soma delas ("Valor Total" acompanha a soma).
+Permuta sem nenhuma linha de crédito (as primeiras) usa o "Valor Total".
 Permuta não é dinheiro: fica fora de Recebido / A receber / Atrasado, da agenda
 e dos avisos do Telegram.
 
@@ -42,6 +46,7 @@ TIPO_PIX     = "Pix"
 TIPO_CARTAO  = "Cartão"
 TIPO_HIBRIDO = "Híbrido"                  # parte no Pix, parte no cartão
 TIPO_PERMUTA = "Permuta"                  # treinamento trocado por produtos/serviços (saldo a retirar)
+TIPO_CREDITO = "Crédito de permuta"       # Forma da linha que SOMA saldo numa permuta (valor + data)
 TIPOS        = [TIPO_PIX, TIPO_CARTAO, TIPO_HIBRIDO, TIPO_PERMUTA]
 FORMAS       = [TIPO_PIX, TIPO_CARTAO]    # forma de UMA parcela (nunca "Híbrido")
 
@@ -408,6 +413,8 @@ def forma_da_parcela(gravada, tipo_cobranca: str) -> str:
         return TIPO_PIX
     if f == "cartao":
         return TIPO_CARTAO
+    if f == chave_busca(TIPO_CREDITO):
+        return TIPO_CREDITO
     if f == "permuta" or tipo_cobranca == TIPO_PERMUTA:
         return TIPO_PERMUTA
     return TIPO_CARTAO if tipo_cobranca == TIPO_CARTAO else TIPO_PIX
@@ -470,9 +477,11 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         ps = sorted((_parcela(p, gravado) for p in por_id.get(cid, [])), key=lambda p: p["n"])
         permuta = gravado == TIPO_PERMUTA
         if permuta:
-            # toda linha de uma permuta é uma retirada, e retirada é coisa que já aconteceu
+            # linha de uma permuta = valor que entrou (crédito) ou retirada; as duas já aconteceram
             for p in ps:
-                p["tipo"], p["paga"] = TIPO_PERMUTA, True
+                p["paga"] = True
+                if p["tipo"] != TIPO_CREDITO:
+                    p["tipo"] = TIPO_PERMUTA
             tipo, hibrida = TIPO_PERMUTA, False
         else:
             # A forma da cobrança sai das parcelas: as duas formas juntas = híbrida.
@@ -490,7 +499,10 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             p["situacao"] = situacao_parcela(p, hoje)
             p["id_cobranca"] = cid
             if permuta:
-                p["rotulo"] = f"Retirada: {p['produto']}" if p["produto"] else "Retirada"
+                if p["tipo"] == TIPO_CREDITO:
+                    p["rotulo"] = "Valor da permuta"
+                else:
+                    p["rotulo"] = f"Retirada: {p['produto']}" if p["produto"] else "Retirada"
                 p["total_n"] = len(ps)
                 continue
             if p["n"] > 0:
@@ -517,9 +529,16 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         else:
             sit = CLI_EM_DIA
         saldo = 0.0
+        creditos = [p for p in ps if p["tipo"] == TIPO_CREDITO]
+        retiradas = [p for p in ps if permuta and p["tipo"] != TIPO_CREDITO]
+        total_permuta = 0.0
         if permuta:
+            # total = soma dos valores (ou o Valor Total, na permuta sem linha de valor);
             # o que falta é o SALDO para retirar; nunca atrasa (não tem data para cobrar)
-            saldo = ((centavos(valor_para_float(c.get("Valor Total")) or 0)) - centavos(pago)) / 100
+            total_permuta = (sum(p["valor"] for p in creditos) if creditos
+                             else valor_para_float(c.get("Valor Total")) or 0.0)
+            pago = sum(p["valor"] for p in retiradas)
+            saldo = (centavos(total_permuta) - centavos(pago)) / 100
             falta, atrasadas, futuras = max(saldo, 0.0), [], []
             sit = CLI_EM_DIA if centavos(saldo) > 0 else CLI_QUITADO
 
@@ -537,6 +556,9 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "hibrida": hibrida,
             "permuta": permuta,
             "saldo": saldo,                     # só na permuta: total - retiradas (negativo = passou)
+            "total_permuta": total_permuta,     # só na permuta: soma dos valores que entraram
+            "creditos": creditos,               # só na permuta: cada valor que entrou, com a data
+            "retiradas": retiradas,             # só na permuta: o que já foi pegado
             # quanto de cada forma: {"Pix": {"pago", "falta", "total", "n"}, "Cartão": {...}}
             "por_forma": {f: _soma_da_forma(ps, f) for f in FORMAS},
             "cliente": _txt(c.get("Cliente")),
@@ -666,14 +688,19 @@ def resumo(cobs: list[dict]) -> dict:
     }
 
 
-def parcelas_permuta(retiradas: list, quem: str = "") -> list[dict]:
+def parcelas_permuta(retiradas: list, quem: str = "", creditos: list = ()) -> list[dict]:
     """
-    Linhas de _Parcelas de uma permuta nova: cada retirada (produto, data, valor) já
-    aconteceu, então entra paga na data dela. Em ordem de data.
+    Linhas de _Parcelas de uma permuta nova: primeiro cada valor que entrou (data, valor),
+    depois cada retirada (produto, data, valor). Tudo já aconteceu, então entra pago na
+    data dele. Cada grupo em ordem de data.
     """
-    return [{"Nº": k, "Vencimento": d, "Valor": v, "Status": STATUS_PAGA, "Pago em": d,
-             "Forma": TIPO_PERMUTA, "Produto": produto, "Marcado por": quem}
-            for k, (produto, d, v) in enumerate(sorted(retiradas, key=lambda r: r[1]), start=1)]
+    linhas = [{"Vencimento": d, "Valor": v, "Status": STATUS_PAGA, "Pago em": d,
+               "Forma": TIPO_CREDITO, "Marcado por": quem}
+              for d, v in sorted(creditos, key=lambda r: r[0])]
+    linhas += [{"Vencimento": d, "Valor": v, "Status": STATUS_PAGA, "Pago em": d,
+                "Forma": TIPO_PERMUTA, "Produto": produto, "Marcado por": quem}
+               for produto, d, v in sorted(retiradas, key=lambda r: r[1])]
+    return [{"Nº": k, **l} for k, l in enumerate(linhas, start=1)]
 
 
 def permutas_do_cliente(cobs: list[dict], cliente: str, menos: str = "") -> list[dict]:

@@ -42,13 +42,12 @@ def semear(banco, hoje: date):
                           "Treinamento": "LORAP", "Valor Total": 6000.0},
                          parcelas_hibrido(1000, d(-8), [1000.0, 1000.0], datas_continuas(d(22), 2),
                                           [1500.0, 1500.0], [d(-8), d(14)], [3, 3], [True, False], hoje))
-    # Permuta: treinamento trocado por produtos da empresa; o mesmo cliente fez uma 2ª permuta depois
-    banco.criar_cobranca({"Tipo": "Permuta", "Cliente": "PADARIA BOM GOSTO (EXEMPLO)", "Turma": "V12",
-                          "Treinamento": "Vendas", "Valor Total": 3000.0},
+    # Permuta: treinamento trocado por produtos da empresa; 2 meses depois fechou outra (2º valor)
+    banco.criar_cobranca({"Tipo": "Permuta", "Cliente": "PADARIA BOM GOSTO (EXEMPLO)", "Turma": "V12, I7",
+                          "Treinamento": "Vendas, Impacto", "Valor Total": 5500.0},
                          parcelas_permuta([("CESTAS DE CAFÉ DA MANHÃ", d(-40), 800.0),
-                                           ("BOLOS PARA O EVENTO", d(-12), 1200.0)]))
-    banco.criar_cobranca({"Tipo": "Permuta", "Cliente": "PADARIA BOM GOSTO (EXEMPLO)", "Turma": "I7",
-                          "Treinamento": "Impacto", "Valor Total": 2500.0}, [])
+                                           ("BOLOS PARA O EVENTO", d(-12), 1200.0)],
+                                          creditos=[(d(-70), 3000.0), (d(-10), 2500.0)]))
 
 
 def banco_demo(hoje: date, recomecar: bool = False) -> Local:

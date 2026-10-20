@@ -268,7 +268,11 @@ with sync_playwright() as p:
     # permuta: cadastro, ficha e a janela de retirada
     abrir(page)
     tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_permuta .hm-card"); auditar(page, "44_permuta_vazia")
-    campo(page, "Valor total da permuta").fill("3000"); campo(page, "Valor total da permuta").press("Enter"); esperar(page)
+    v = page.locator(".st-key-pm_cred_0 input[aria-label='Valor da permuta']")
+    v.fill("3000"); v.press("Enter"); esperar(page)
+    page.locator("button:visible", has_text="Adicionar outro valor").first.click(); esperar(page)
+    v = page.locator(".st-key-pm_cred_1 input[aria-label='Valor da permuta']")
+    v.fill("1000"); v.press("Enter"); esperar(page)
     page.locator(".st-key-pm_ret_0 input[aria-label='Produto']").fill("cestas")
     c = page.locator(".st-key-pm_ret_0 input[aria-label='Quanto desconta']")
     c.fill("5000"); c.press("Enter"); esperar(page)

@@ -632,6 +632,36 @@ class Permuta(unittest.TestCase):
         self.assertEqual(len(n.filtrar([c], tipos=["Permuta"])), 1)
         self.assertEqual(len(n.filtrar([c], tipos=["Pix"])), 0)
 
+    def test_varios_valores_cada_um_com_a_data(self):
+        """A mesma permuta recebe outro valor depois (a pessoa fechou outra permuta): o total é a soma."""
+        import dados
+        cab = n.PARCELAS_HEADERS
+        linhas = n.parcelas_permuta([("CESTAS", date(2026, 8, 1), 800.0)], "Gabi",
+                                    creditos=[(date(2026, 9, 10), 2500.0), (date(2026, 7, 1), 3000.0)])
+        self.assertEqual([(l["Nº"], l["Forma"], l["Vencimento"]) for l in linhas],
+                         [(1, "Crédito de permuta", date(2026, 7, 1)), (2, "Crédito de permuta", date(2026, 9, 10)),
+                          (3, "Permuta", date(2026, 8, 1))])
+        planilha = [dict(zip(cab, dados._linha(cab, {**l, "ID Cobrança": "p1"}))) for l in linhas]
+        c = n.montar_cobrancas([cob("p1", tipo="Permuta", total="5500,00")], planilha, HOJE)[0]
+        self.assertEqual((c["total_permuta"], c["pago"], c["saldo"]), (5500, 800, 4700))
+        self.assertEqual([p["valor"] for p in c["creditos"]], [3000, 2500])
+        self.assertEqual([p["produto"] for p in c["retiradas"]], ["CESTAS"])
+        self.assertEqual([p["rotulo"] for p in c["parcelas"]],
+                         ["Valor da permuta", "Valor da permuta", "Retirada: CESTAS"])
+        r = n.resumo([c])
+        self.assertEqual((r["recebido"], r["a_receber"], r["saldo_permuta"]), (0, 0, 4700))
+
+    def test_total_vem_dos_valores_e_nao_da_coluna(self):
+        # a soma dos valores manda; o "Valor Total" só vale para a permuta antiga, sem linha de valor
+        import dados
+        cab = n.PARCELAS_HEADERS
+        linhas = n.parcelas_permuta([], creditos=[(date(2026, 7, 1), 1000.0)])
+        planilha = [dict(zip(cab, dados._linha(cab, {**l, "ID Cobrança": "p1"}))) for l in linhas]
+        c = n.montar_cobrancas([cob("p1", tipo="Permuta", total="9999,00")], planilha, HOJE)[0]
+        self.assertEqual(c["total_permuta"], 1000)
+        antiga = self.montar([])
+        self.assertEqual((antiga["total_permuta"], antiga["creditos"]), (3000, []))
+
     def test_varias_permutas_do_mesmo_cliente(self):
         a = self.montar([], cid="p1", cliente="Padaria Bom Gosto")
         b = self.montar([], cid="p2", cliente="PADARIA BOM GOSTO")

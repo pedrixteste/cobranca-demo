@@ -34,7 +34,7 @@
     --pix:     #9CCBFF;  --pix-bg:    #16355C;
     --cartao-cor: #FFA9D4;  --cartao-bg: #56203F;
     /* permuta (treinamento trocado por produtos): VERDE-ÁGUA, longe do azul do Pix e do rosa do cartão */
-    --permuta: #8DE3CF;  --permuta-bg: #123F37;
+    --permuta: #8DE3CF;  --permuta-bg: #123F37;  --permuta-leve: #15241F;  --sobre-permuta: #0B2620;
     --selo-fundo: rgba(20,22,27,.82);   /* atrás dos carimbos PAGO / QUITADO */
     --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
     --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -181,6 +181,11 @@ header[data-testid="stHeader"] { display: none; }
 [class*="st-key-pm_ret_"] { border-left: 3px solid var(--permuta-bg); padding-left: 10px; }
 [class*="st-key-pc_"]:has(.pc.c-ret) { border-left-color: var(--permuta); }
 .pc.c-ret .pc-data { background: var(--permuta-bg); color: var(--permuta); }
+/* valor que ENTROU na permuta: o bloco da data cheio de verde-água (a retirada é só contornada) */
+[class*="st-key-pm_cred_"] { border-left: 3px solid var(--permuta); padding-left: 10px; }
+[class*="st-key-pc_"]:has(.pc.c-cred) { border-left-color: var(--permuta); background: var(--permuta-leve); }
+.pc.c-cred .pc-data { background: var(--permuta); color: var(--sobre-permuta); }
+.pc.c-cred .pc-valor { color: var(--permuta); }
 
 .pg   { height: 7px; background: var(--neutro-bg); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
 .pg i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }
