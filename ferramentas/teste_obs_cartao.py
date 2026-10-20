@@ -132,7 +132,7 @@ with sync_playwright() as p:
             page.locator(".cc", has_text="Larissa Teste Cartão").locator(".cc-nota").count() == 1)
     total = page.locator(".cc").count()
     page.screenshot(path=str(OUT / "relatorio_compacto.png"), full_page=True)
-    por(page, "Buscar", "permuta")
+    por(page, "Buscar", "marido")   # palavra só da observação (desde 20/10 "permuta" acha também as permutas)
     confere("busca por palavra da observação acha a cobrança",
             page.locator(".cc").count() == 1 and page.locator(".cc", has_text="Larissa").count() == 1)
     por(page, "Buscar", "")

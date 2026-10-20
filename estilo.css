@@ -33,6 +33,8 @@
     /* forma de pagamento: Pix AZUL, Cartão ROSA (só para diferenciar de relance) */
     --pix:     #9CCBFF;  --pix-bg:    #16355C;
     --cartao-cor: #FFA9D4;  --cartao-bg: #56203F;
+    /* permuta (treinamento trocado por produtos): VERDE-ÁGUA, longe do azul do Pix e do rosa do cartão */
+    --permuta: #8DE3CF;  --permuta-bg: #123F37;
     --selo-fundo: rgba(20,22,27,.82);   /* atrás dos carimbos PAGO / QUITADO */
     --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
     --texto:   'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -168,6 +170,17 @@ header[data-testid="stHeader"] { display: none; }
 .tp-cartao { background: var(--cartao-bg); color: var(--cartao-cor); }
 /* híbrido = as duas formas juntas: metade azul do Pix, metade rosa do cartão */
 .tp-hib    { background: linear-gradient(90deg, var(--pix-bg) 0 50%, var(--cartao-bg) 50% 100%); color: var(--tinta); }
+.tp-perm   { background: var(--permuta-bg); color: var(--permuta); }
+
+/* Permuta: linha do saldo no topo do relatório, retiradas na ficha e o "Saldo" em destaque */
+.rs-perm { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: .8rem; color: var(--apoio);
+           margin: 0 0 6px 2px; }
+.rs-perm b { color: var(--permuta); font-family: var(--mono); font-weight: 600; }
+.fc-nums.fc-perm div:first-child b, .fc-nums.fc-perm div:first-child span { color: var(--tinta); }
+.fc-nums.fc-perm div:last-child b, .fc-nums.fc-perm div:last-child span { color: var(--permuta); }
+[class*="st-key-pm_ret_"] { border-left: 3px solid var(--permuta-bg); padding-left: 10px; }
+[class*="st-key-pc_"]:has(.pc.c-ret) { border-left-color: var(--permuta); }
+.pc.c-ret .pc-data { background: var(--permuta-bg); color: var(--permuta); }
 
 .pg   { height: 7px; background: var(--neutro-bg); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
 .pg i { display: block; height: 100%; background: var(--ok); border-radius: 99px; }

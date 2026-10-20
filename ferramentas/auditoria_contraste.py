@@ -265,6 +265,22 @@ with sync_playwright() as p:
     botao(page, "Adicionar parcela ou data"); auditar(page, "43_dlg_adicionar_hibrido")
     page.keyboard.press("Escape"); esperar(page)
 
+    # permuta: cadastro, ficha e a janela de retirada
+    abrir(page)
+    tocar(page, ".st-key-hm_nova .hm-card"); tocar(page, ".st-key-hm_permuta .hm-card"); auditar(page, "44_permuta_vazia")
+    campo(page, "Valor total da permuta").fill("3000"); campo(page, "Valor total da permuta").press("Enter"); esperar(page)
+    page.locator(".st-key-pm_ret_0 input[aria-label='Produto']").fill("cestas")
+    c = page.locator(".st-key-pm_ret_0 input[aria-label='Quanto desconta']")
+    c.fill("5000"); c.press("Enter"); esperar(page)
+    auditar(page, "45_permuta_passou_do_total")
+    abrir(page)
+    tocar(page, ".st-key-hm_rel .hm-card")
+    box = page.locator(".cc", has_text="PADARIA").first.bounding_box()
+    page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); esperar(page)
+    auditar(page, "46_ficha_permuta")
+    botao(page, "Adicionar retirada"); auditar(page, "47_dlg_retirada")
+    page.keyboard.press("Escape"); esperar(page)
+
     abrir(page)
     botao(page, "Usando como"); auditar(page, "32_trocar_pessoa")
     b.close()

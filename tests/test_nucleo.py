@@ -582,6 +582,65 @@ class CobrancaAntiga(unittest.TestCase):
                          [("Pix", "Paga"), ("Pix", ""), ("Cartão", "Paga")])
 
 
+class Permuta(unittest.TestCase):
+    """Treinamento trocado por produtos (pedido 20/10): um saldo que vai sendo retirado."""
+
+    def montar(self, retiradas, total="3000,00", cid="p1", cliente="Padaria"):
+        import dados
+        cab = n.PARCELAS_HEADERS
+        linhas = [dict(zip(cab, dados._linha(cab, {**l, "ID Cobrança": cid})))
+                  for l in n.parcelas_permuta(retiradas, "Gabi")]
+        return n.montar_cobrancas([cob(cid, tipo="Permuta", cliente=cliente, total=total)], linhas, HOJE)[0]
+
+    def test_linhas_das_retiradas(self):
+        linhas = n.parcelas_permuta([("BOLOS", date(2026, 9, 20), 1200.0), ("CESTAS", date(2026, 8, 1), 800.0)], "Gabi")
+        self.assertEqual([(l["Nº"], l["Produto"], l["Forma"], l["Status"]) for l in linhas],
+                         [(1, "CESTAS", "Permuta", "Paga"), (2, "BOLOS", "Permuta", "Paga")])   # em ordem de data
+        self.assertEqual(linhas[0]["Pago em"], date(2026, 8, 1))
+        self.assertEqual(linhas[0]["Marcado por"], "Gabi")
+
+    def test_saldo(self):
+        c = self.montar([("CESTAS", date(2026, 8, 1), 800.0), ("BOLOS", date(2026, 9, 20), 1200.0)])
+        self.assertEqual((c["tipo"], c["permuta"], c["hibrida"]), ("Permuta", True, False))
+        self.assertEqual((c["pago"], c["saldo"], c["falta"]), (2000, 1000, 1000))
+        self.assertEqual(c["situacao"], n.CLI_EM_DIA)
+        self.assertEqual([p["rotulo"] for p in c["parcelas"]], ["Retirada: CESTAS", "Retirada: BOLOS"])
+        self.assertEqual((c["atrasado"], c["proxima"]), (0, None))
+
+    def test_sem_retirada_e_saldo_zerado(self):
+        c = self.montar([])
+        self.assertEqual((c["saldo"], c["situacao"]), (3000, n.CLI_EM_DIA))
+        c = self.montar([("TUDO", date(2026, 8, 1), 3000.0)])
+        self.assertEqual((c["saldo"], c["situacao"]), (0, n.CLI_QUITADO))
+
+    def test_retirada_que_passa_do_total(self):
+        c = self.montar([("TUDO", date(2026, 8, 1), 3500.0)])
+        self.assertEqual((c["saldo"], c["falta"], c["situacao"]), (-500, 0, n.CLI_QUITADO))
+
+    def test_nao_entra_no_dinheiro_nem_nos_avisos(self):
+        perm = self.montar([("CESTAS", date(2026, 9, 29), 800.0)])
+        pix = n.montar_cobrancas([cob("a1")], [parc("a1", 1, "28/09/2026", "450,00")], HOJE)[0]
+        r = n.resumo([perm, pix])
+        self.assertEqual((r["recebido"], r["a_receber"], r["atrasado"]), (0, 450, 450))
+        self.assertEqual((r["n_permutas"], r["saldo_permuta"]), (1, 2200))
+        self.assertEqual(n.agenda([perm], date(2026, 9, 1), date(2026, 10, 31)), [])
+        self.assertIsNone(notifier.montar_diario([perm], HOJE))
+
+    def test_busca_pelo_produto_e_filtro(self):
+        c = self.montar([("CESTAS DE CAFÉ", date(2026, 8, 1), 800.0)])
+        self.assertEqual(len(n.filtrar([c], "cafe")), 1)
+        self.assertEqual(len(n.filtrar([c], tipos=["Permuta"])), 1)
+        self.assertEqual(len(n.filtrar([c], tipos=["Pix"])), 0)
+
+    def test_varias_permutas_do_mesmo_cliente(self):
+        a = self.montar([], cid="p1", cliente="Padaria Bom Gosto")
+        b = self.montar([], cid="p2", cliente="PADARIA BOM GOSTO")
+        outro = self.montar([], cid="p3", cliente="Mercado")
+        self.assertEqual([c["id"] for c in n.permutas_do_cliente([a, b, outro], "padaria bom gosto")], ["p1", "p2"])
+        self.assertEqual([c["id"] for c in n.permutas_do_cliente([a, b, outro], "Padaria Bom Gosto", menos="p1")],
+                         ["p2"])
+
+
 class Notificacoes(unittest.TestCase):
     CFG = {"telegram:Pedro": "111", "telegram:Ana": "222", "avisos:Ana": "nao", "telegram:Zé": "",
            "avisar_amanha": "não", "pessoas": "Pedro, Ana, Zé"}
