@@ -957,6 +957,32 @@ def _resumo_pix(entrada: float, data_entrada, valores: list, datas: list, hoje: 
     return linhas
 
 
+def _resumo_cartao(ja_pago: float, valores: list, datas: list, vezes: list, passou: list,
+                   com_fim: bool = True, cabecalho: bool = True) -> list:
+    """
+    Linhas do resumo do cartão, no mesmo jeito do Pix (pedido 21/10): o já pago, cada passada
+    (data, valor, em quantas vezes) e até quando vai. Aparece desde que se diz quantas vezes
+    passa: a passada ainda sem data vai para o fim com "falta escolher", para dar para
+    conferir enquanto preenche. `cabecalho` = linha com quantas passadas e quanto somam.
+    """
+    linhas = []
+    if ja_pago > 0:
+        linhas.append(f"Já pago: <b>{formatar_brl(ja_pago)}</b>")
+    if not valores:
+        return linhas
+    if cabecalho and len(valores) > 1:
+        linhas.append(f"Cartão em <b>{len(valores)} passadas</b>, somando {formatar_brl(sum(valores))}")
+    for d, v, x, ok in sorted((d, v, x, ok) for d, v, x, ok in zip(datas, valores, vezes, passou) if d):
+        linhas.append(f"<b>{data_br(d)}</b> · {formatar_brl(v)} · {texto_vezes(v, x)}"
+                      + (" · <b>já passou</b>" if ok else ""))
+    for k, (d, v, x) in enumerate(zip(datas, valores, vezes)):
+        if d is None:
+            linhas.append(f"<b>Data {k + 1}: falta escolher</b> · {formatar_brl(v)} · {texto_vezes(v, x)}")
+    if com_fim and all(datas):
+        linhas.append(f"A cobrança vai até <b>{nome_mes(max(datas))}</b>")
+    return linhas
+
+
 def _bloco_passadas_cartao(prefixo: str, a_cobrar: float, total, erros: list, hoje: date | None = None):
     """
     Quantas vezes o cartão passa e, em cada uma, a data, o valor e em quantas parcelas.
@@ -1093,16 +1119,13 @@ def tela_cartao():
     confirmado = True
     with st.container(key="sec_ct4"):
         _titulo_secao(4, "Resumo")
-        if valores and all(datas):
-            linhas = [f"<b>{data_br(d)}</b> · {formatar_brl(v)} · {texto_vezes(v, x)}"
-                      + (" · <b>já passou</b>" if ok else "")
-                      for d, v, x, ok in sorted(zip(datas, valores, vezes, passou))]
-            _info("<br>".join(linhas) + f"<br>A cobrança vai até <b>{nome_mes(max(datas))}</b>")
+        if valores:
+            _info("<br>".join(_resumo_cartao(ja_pago, valores, datas, vezes, passou)))
             confirmado = _bloco_conferencia(total, [ja_pago] + valores, "ct_")
             _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
                   "e todo dia enquanto não passar.", "cx-nota")
         else:
-            st.caption("Escolha as datas para ver o resumo.")
+            st.caption("Diga quantas vezes vai passar o cartão para ver o resumo.")
 
     obs_ct = st.text_input("Observação (opcional)", key="ct_obs", max_chars=300,
                            placeholder="Ex.: cartão do marido")
@@ -1186,21 +1209,27 @@ def tela_hibrido():
     confirmado = True
     with st.container(key="sec_hb5"):
         _titulo_secao(5, "Resumo")
+        # Aparece assim que o total está dividido (pedido 21/10): a parte ainda não preenchida
+        # fica com "falta preencher", para dar para conferir enquanto preenche.
         linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False, pagas=pix_pagas)
-        if linhas_px and valores_ct and all(datas_ct):
-            linhas = [f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(entrada + sum(valores_px))}</b>"] + linhas_px
-            linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(sum(valores_ct))}</b>")
-            for d, v, x, ok in sorted(zip(datas_ct, valores_ct, vezes, passou)):
-                linhas.append(f"{data_br(d)} · {formatar_brl(v)} · {texto_vezes(v, x)}"
-                              + (" · <b>já passou</b>" if ok else ""))
-            fim = max([d for d in datas_px if d] + datas_ct + ([data_entrada] if data_entrada else []))
-            linhas.append(f"A cobrança vai até <b>{nome_mes(fim)}</b>")
+        linhas_ct = _resumo_cartao(0, valores_ct, datas_ct, vezes, passou, com_fim=False, cabecalho=False)
+        if parte_pix:
+            soma_px = entrada + sum(valores_px) if linhas_px else parte_pix
+            soma_ct = sum(valores_ct) if valores_ct else parte_cartao
+            linhas = [f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(soma_px)}</b>"]
+            linhas += linhas_px or ["<b>Falta preencher</b> a parte do Pix"]
+            linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(soma_ct)}</b>")
+            linhas += linhas_ct or ["<b>Falta preencher</b> a parte do cartão"]
+            if linhas_px and valores_ct and all(datas_ct):
+                fim = max([d for d in datas_px if d] + datas_ct + ([data_entrada] if data_entrada else []))
+                linhas.append(f"A cobrança vai até <b>{nome_mes(fim)}</b>")
             _info("<br>".join(linhas))
-            confirmado = _bloco_conferencia(total, [entrada] + valores_px + valores_ct, "hb_")
+            if linhas_px and valores_ct:
+                confirmado = _bloco_conferencia(total, [entrada] + valores_px + valores_ct, "hb_")
             _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
                   "e todo dia enquanto estiver atrasado.", "cx-nota")
         else:
-            st.caption("Preencha a parte do Pix e a parte do cartão para ver o resumo.")
+            st.caption("Preencha o valor total e quanto vai no Pix ou no cartão para ver o resumo.")
 
     obs_hb = st.text_input("Observação (opcional)", key="hb_obs", max_chars=300,
                            placeholder="Ex.: cartão do marido")
@@ -1379,6 +1408,7 @@ def tela_permuta():
             if not retiradas:
                 linhas.append("Nenhuma retirada ainda")
             _info("<br>".join(linhas))
+            st.markdown(_html_saldo(total, retirado), unsafe_allow_html=True)   # o "fecha certinho" da permuta
             _info("Permuta não entra no Recebido nem no A receber, e o Telegram não avisa: ela tem o "
                   "próprio saldo.", "cx-nota")
         else:
