@@ -56,7 +56,17 @@ def por_data(page, indice: int, d: date):
 
 
 def texto(page, sec):
-    return page.locator(f".st-key-{sec}").inner_text().replace("\n", " | ")
+    return page.locator(f".st-key-{sec}").inner_text().replace("\n", " | ").replace("\xa0", " ")
+
+
+def fundo(page, sel):
+    """Cor de fundo de verdade da caixa (prova que o estilo chegou na tela)."""
+    return page.locator(sel).first.evaluate("e => getComputedStyle(e).backgroundColor")
+
+
+def nao_quebra_rs(page, sel):
+    """Todo 'R$' da caixa vem grudado no número por espaço que não quebra (não sobra 'R$' sozinho no fim da linha)."""
+    return page.locator(sel).first.evaluate("e => /R\\$/.test(e.innerText) && !/R\\$ /.test(e.innerText)")
 
 
 def nova(page, chave):
@@ -115,6 +125,21 @@ with sync_playwright() as p:
     por(page, "Valor 2", "5000")
     r = texto(page, "sec_ct4")
     confere("cartão: valor que não fecha avisa a diferença", "Faltam R$ 1.000,00" in r, r[-160:])
+    sel_falta = ".st-key-sec_ct4 .cx-falta"
+    confere("cartão: 'Faltam' na caixa laranja forte",
+            page.locator(sel_falta, has_text="Faltam").count() == 1 and fundo(page, sel_falta) == "rgb(232, 134, 42)",
+            fundo(page, sel_falta) if page.locator(sel_falta).count() else "sem caixa")
+    confere("cartão: 'Faltam' sem 'R$' sozinho no fim da linha", nao_quebra_rs(page, sel_falta))
+    page.locator(".st-key-sec_ct4").screenshot(path=str(OUT / "resumo_cor_faltam.png"))
+    por(page, "Valor 2", "7000")
+    r = texto(page, "sec_ct4")
+    confere("cartão: valor a mais avisa quanto passa", "Passa R$ 1.000,00 do total de R$ 12.000,00" in r, r[-160:])
+    sel_passa = ".st-key-sec_ct4 .cx-passa"
+    confere("cartão: 'Passa' na caixa vermelha forte",
+            page.locator(sel_passa, has_text="Passa").count() == 1 and fundo(page, sel_passa) == "rgb(196, 67, 43)",
+            fundo(page, sel_passa) if page.locator(sel_passa).count() else "sem caixa")
+    confere("cartão: 'Passa' não usa mais a caixa antiga", page.locator(".st-key-sec_ct4 .cx-perigo").count() == 0)
+    page.locator(".st-key-sec_ct4").screenshot(path=str(OUT / "resumo_cor_passa.png"))
     por(page, "Valor 2", "")
     confere("cartão: apagar o valor volta a fechar", "Fecha certinho" in texto(page, "sec_ct4"))
     botao(page, "Salvar cobrança"); esperar(page, 2500)
@@ -162,7 +187,7 @@ with sync_playwright() as p:
     page.locator(".st-key-sec_pm4").screenshot(path=str(OUT / "resumo_permuta.png"))
     por(page, "Quanto desconta", "9000")
     confere("permuta: resumo avisa quando passa do total",
-            page.locator(".st-key-sec_pm4 .cx-perigo", has_text="passam do total").count() == 1)
+            page.locator(".st-key-sec_pm4 .cx-passa", has_text="passam do total").count() == 1)
     b.close()
 
 print("\nFALHAS:" if falhas else "\nTUDO OK", *falhas, sep="\n- " if falhas else "")

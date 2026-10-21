@@ -817,12 +817,15 @@ def _bloco_conferencia(total, partes, prefixo: str) -> bool:
     if total is None:
         return True
     dif = conferir_total(total, partes)
+    brl = lambda v: formatar_brl(v).replace(" ", "&nbsp;")   # "R$" nunca sozinho no fim da linha
     if abs(dif) < 0.005:
-        _info(f"<b>Fecha certinho</b> com o total de {formatar_brl(total)}.", "cx-ok")
+        _info(f"<b>Fecha certinho</b> com o total de {brl(total)}.", "cx-ok")
         return True
-    txt = (f"Faltam <b>{formatar_brl(dif)}</b> para chegar no total" if dif > 0
-           else f"Passa <b>{formatar_brl(-dif)}</b> do total")
-    _info(f"{txt} de {formatar_brl(total)}.", "cx-perigo")
+    # Cada caso com a sua cor (pedido 21/10): faltando = laranja forte, passando = vermelho forte
+    if dif > 0:
+        _info(f"Faltam <b>{brl(dif)}</b> para chegar no total de {brl(total)}.", "cx-falta")
+    else:
+        _info(f"Passa <b>{brl(-dif)}</b> do total de {brl(total)}.", "cx-passa")
     return st.checkbox("Está certo assim, salvar mesmo com a diferença", key=f"{prefixo}aceito_dif")
 
 
@@ -1359,7 +1362,7 @@ def _bloco_retiradas(prefixo: str, hoje: date, erros: list) -> list:
 def _html_saldo(total, retirado: float) -> str:
     saldo = (centavos(total or 0) - centavos(retirado)) / 100
     if saldo < 0:
-        return (f"<div class='cx-perigo'>As retiradas passam do total da permuta em "
+        return (f"<div class='cx-passa'>As retiradas passam do total da permuta em "
                 f"<b>{formatar_brl(-saldo)}</b>.</div>")
     return f"<div class='cx-ok'>Saldo para retirar: <b>{formatar_brl(saldo)}</b></div>"
 

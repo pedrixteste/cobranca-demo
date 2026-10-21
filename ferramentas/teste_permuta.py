@@ -114,7 +114,7 @@ with sync_playwright() as p:
     por(page, "Produto", "bonés", ".st-key-pm_ret_1")
     por(page, "Quanto desconta", "9000", ".st-key-pm_ret_1")
     confere("avisa quando as retiradas passam do total",
-            page.locator(".st-key-sec_pm3 .cx-perigo", has_text="passam do total").count() == 1)
+            page.locator(".st-key-sec_pm3 .cx-passa", has_text="passam do total").count() == 1)
     por(page, "Quanto desconta", "800", ".st-key-pm_ret_1")
     saldo = page.locator(".st-key-sec_pm3").inner_text()
     confere("saldo = valores - retiradas (3.000)", "Saldo para retirar: R$ 3.000,00" in saldo, saldo[-80:])
