@@ -227,6 +227,41 @@ class PessoasEAparelhos(unittest.TestCase):
         self.assertEqual(n.nomes_livres({**self.CFG, "aparelho:bbbb": ""}), ["Gabi", "Ana"])
 
 
+class EntradaComGoogle(unittest.TestCase):
+    """Cada pessoa ligada a um Gmail (pedido 26/10)."""
+    CFG = {"pessoas": "Pedro, Gabi, Ana", "email:Pedro": "Pedro.X@Gmail.com ", "email:Gabi": "gabi@gmail.com",
+           "email:Fulano": "fulano@gmail.com"}
+
+    def test_email_de_cada_pessoa(self):
+        self.assertEqual(n.emails_por_pessoa(self.CFG),
+                         {"Pedro": "pedro.x@gmail.com", "Gabi": "gabi@gmail.com", "Ana": ""})
+
+    def test_quem_e_pelo_email_sem_ligar_para_maiuscula(self):
+        self.assertEqual(n.pessoa_do_email(self.CFG, "PEDRO.x@gmail.com"), "Pedro")
+        self.assertEqual(n.pessoa_do_email(self.CFG, "gabi@gmail.com"), "Gabi")
+
+    def test_email_desconhecido_ou_de_pessoa_removida_nao_entra(self):
+        self.assertEqual(n.pessoa_do_email(self.CFG, "outro@gmail.com"), "")
+        self.assertEqual(n.pessoa_do_email(self.CFG, "fulano@gmail.com"), "")   # Fulano saiu da lista
+        self.assertEqual(n.pessoa_do_email(self.CFG, ""), "")
+        self.assertEqual(n.pessoa_do_email({"pessoas": "Ana", "email:Ana": ""}, ""), "")
+
+    def test_mesmo_email_em_dois_nomes_e_barrado(self):
+        self.assertEqual(n.dono_do_email(self.CFG, "GABI@gmail.com", menos="Ana"), "Gabi")
+        self.assertEqual(n.dono_do_email(self.CFG, "gabi@gmail.com", menos="Gabi"), "")
+        self.assertEqual(n.dono_do_email(self.CFG, "nova@gmail.com"), "")
+
+    def test_email_valido(self):
+        self.assertTrue(n.email_valido(" Gabi@Gmail.com "))
+        for ruim in ("", "gabi", "gabi@", "@gmail.com", "ga bi@gmail.com", "a@b", "a,b@gmail.com"):
+            self.assertFalse(n.email_valido(ruim), ruim)
+
+    def test_ligado_so_com_sim(self):
+        self.assertFalse(n.login_google_ligado({}))
+        self.assertFalse(n.login_google_ligado({"login_google": "nao"}))
+        self.assertTrue(n.login_google_ligado({"login_google": "Sim"}))
+
+
 class Observacoes(unittest.TestCase):
     def setUp(self):
         self.cobs = n.montar_cobrancas(

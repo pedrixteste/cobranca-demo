@@ -51,6 +51,8 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
                     cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     formatar_telefone, link_ligar, link_whatsapp, telefone_do_cliente, telefone_valido,
+                    dono_do_email, email_valido, emails_por_pessoa, login_google_ligado, normalizar_email,
+                    pessoa_do_email,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
                     TIPO_PERMUTA, TIPO_CREDITO, parcelas_permuta, permutas_do_cliente,
@@ -417,7 +419,12 @@ def tela_inicio():
                                   type="tertiary"):
         _ir("config")
 
-    if _usuario() and _travado():
+    if _usuario() and _login_ligado():
+        if st.button(f"Usando como {_usuario()} · sair", key="btn_sair_google", icon=":material/logout:",
+                     type="tertiary", help="Sai do Gmail neste aparelho. Para entrar de novo, é só tocar em "
+                                           "Entrar com Google."):
+            _sair_google()
+    elif _usuario() and _travado():
         st.markdown(f"<div class='hm-quem'>Usando como <b>{_e(_usuario())}</b></div>", unsafe_allow_html=True)
     elif _usuario() and st.button(f"Usando como {_usuario()} · trocar", key="btn_trocar_pessoa",
                                   icon=":material/person:", type="tertiary"):
@@ -562,8 +569,111 @@ def _prender(aparelho: str, nome: str, pessoas: list):
     st.rerun()
 
 
+# ── Entrada com Google (pedido 26/10) ─────────────────────────────────────────
+# Cada pessoa ligada a UM Gmail (Configurações); quem entra com aquele Gmail, em qualquer
+# aparelho, é aquela pessoa. Só vale quando as TRÊS coisas acontecem:
+#   1. a chave do Google está nos Secrets ([auth] + [auth.google], ver _login_configurado);
+#   2. o administrador testou com o próprio Gmail e tocou em "Ligar" (_Config login_google = sim);
+#   3. não é a demonstração.
+# Até lá, tudo continua pela trava por aparelho. Se um dia o Google der problema: tirar o [auth]
+# dos Secrets volta o app para a trava por aparelho na hora (ninguém fica trancado do lado de fora).
+# Teste no PC sem Google: COBRANCA_LOGIN_TESTE=1 troca o Google por um campo de e-mail.
+
+def _login_teste() -> bool:
+    return bool(os.environ.get("COBRANCA_LOGIN_TESTE"))
+
+
+def _auth_secrets():
+    try:
+        return st.secrets.get("auth")
+    except Exception:
+        return None
+
+
+def _provedor():
+    """'google' quando a chave está em [auth.google]; None quando está direto em [auth]."""
+    auth = _auth_secrets()
+    try:
+        return "google" if auth and auth.get("google") else None
+    except Exception:
+        return None
+
+
+def _login_configurado() -> bool:
+    if _modo_demo():
+        return False
+    if _login_teste():
+        return True
+    auth = _auth_secrets()
+    try:
+        return bool(auth and (auth.get("client_id") or (auth.get("google") or {}).get("client_id")))
+    except Exception:
+        return False
+
+
+def _login_ligado() -> bool:
+    return _login_configurado() and login_google_ligado(_config())
+
+
+def _email_google() -> str:
+    """Gmail com que a pessoa entrou ('' se não entrou)."""
+    if _login_teste():
+        return st.session_state.get("_email_teste", "")
+    try:
+        return normalizar_email(st.user.email) if st.user.is_logged_in else ""
+    except Exception:
+        return ""
+
+
+def _botao_google(rotulo: str, chave: str):
+    """Botão que leva para a tela do Google. No teste do PC, um campo de e-mail faz o papel do Google."""
+    if _login_teste():
+        email = st.text_input("E-mail do Google (teste)", key=f"{chave}_email")
+        if st.button(rotulo, key=chave, type="primary", icon=":material/login:", use_container_width=True):
+            st.session_state["_email_teste"] = normalizar_email(email)
+            st.rerun()
+        return
+    if st.button(rotulo, key=chave, type="primary", icon=":material/login:", use_container_width=True):
+        st.login(_provedor())
+
+
+def _sair_google():
+    st.session_state.pop("_quem", None)
+    if _login_teste():
+        st.session_state.pop("_email_teste", None)
+        st.rerun()
+    st.logout()
+
+
+def _identificado_google() -> bool:
+    """Com a entrada com Google ligada: quem é sai do Gmail (conferido a cada tela, então tirar o
+    Gmail de alguém em Configurações vale na hora)."""
+    email = _email_google()
+    if email:
+        nome = pessoa_do_email(_config(), email)
+        if nome:
+            st.session_state["_quem"] = nome
+            return True
+    st.session_state.pop("_quem", None)
+    st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Cobranças</div>", unsafe_allow_html=True)
+    if email:
+        adm = _e(administrador(_config()))
+        _info(f"O Gmail <b>{_e(email)}</b> não tem acesso a este app. Peça para <b>{adm}</b> colocar o "
+              "seu Gmail em <b>Configurações</b>.", "cx-perigo")
+        if st.button("Entrar com outro Gmail", key="gg_outro", icon=":material/switch_account:",
+                     use_container_width=True):
+            _sair_google()
+        return False
+    st.markdown("<div class='cx-sub'>Entre com o seu Gmail. Vale em qualquer celular ou computador.</div>",
+                unsafe_allow_html=True)
+    _botao_google("Entrar com Google", "gg_entrar")
+    return False
+
+
 def _identificado() -> bool:
     """True se já se sabe quem está usando; senão mostra a tela certa e devolve False."""
+    if _banco() is not None and _login_ligado():
+        return _identificado_google()
     if st.session_state.get("_quem"):
         return True
     if _banco() is None:
@@ -646,8 +756,72 @@ def _config_varias(pares: dict) -> bool:
         return False
 
 
+def _salvar_email(pessoa: str, email: str, chave_erro: str) -> bool:
+    """Liga o Gmail à pessoa (vazio = tira). Confere se é e-mail e se ninguém mais usa."""
+    email = normalizar_email(email)
+    cfg = _config()
+    if email and not email_valido(email):
+        st.session_state[chave_erro] = "Esse e-mail não parece certo. Ex.: nome@gmail.com"
+        return False
+    outro = dono_do_email(cfg, email, menos=pessoa) if email else ""
+    if outro:
+        st.session_state[chave_erro] = f"Esse Gmail já é de {outro}."
+        return False
+    st.session_state.pop(chave_erro, None)
+    return _config_varias({f"email:{pessoa}": email})
+
+
+def _secao_google(cfg: dict, adm: str):
+    """O teste e o botão de ligar a entrada com Google (só aparece com a chave nos Secrets)."""
+    ligado = login_google_ligado(cfg)
+    emails = emails_por_pessoa(cfg)
+    meu = emails.get(adm, "")
+    logado = _email_google()
+    with st.container(key="sec_cf_google"):
+        _titulo_secao("G", "Entrada com Google")
+        if ligado:
+            _info("<b>Ligada.</b> Cada pessoa entra com o próprio Gmail, em qualquer celular ou computador. "
+                  "Para tirar o acesso de alguém, apague o Gmail dela abaixo.", "cx-ok")
+            sem = [p for p, e in emails.items() if not e]
+            if sem:
+                _info(f"Sem Gmail (não conseguem entrar): <b>{_e(', '.join(sem))}</b>.", "cx-falta")
+            if st.button("Desligar e voltar para a trava por aparelho", key="cf_gg_desligar",
+                         icon=":material/phonelink_lock:", type="tertiary"):
+                if _config_varias({"login_google": ""}):
+                    _flash("Entrada com Google desligada: o app volta a reconhecer cada aparelho")
+                    st.rerun()
+            return
+        _info("<b>Desligada.</b> Hoje o app reconhece cada aparelho. Com a entrada com Google, cada pessoa "
+              "entra com o próprio Gmail, em qualquer aparelho.", "cx-nota")
+        if not meu:
+            _info("1. Coloque abaixo o Gmail de cada pessoa, começando pelo seu.", "cx-info")
+            return
+        if not logado:
+            _info(f"Teste com o seu Gmail (<b>{_e(meu)}</b>). Depois de entrar no Google, volte a esta tela.",
+                  "cx-info")
+            _botao_google("Testar com o Google", "cf_gg_testar")
+            return
+        if logado != meu:
+            _info(f"O Google confirmou o Gmail <b>{_e(logado)}</b>, mas o seu aqui é <b>{_e(meu)}</b>. "
+                  "Entre com o Gmail certo.", "cx-perigo")
+            if st.button("Entrar com outro Gmail", key="cf_gg_outro", icon=":material/switch_account:",
+                         use_container_width=True):
+                _sair_google()
+            return
+        _info(f"<b>Deu certo:</b> o Google confirmou que você é <b>{_e(logado)}</b>.", "cx-ok")
+        sem = [p for p, e in emails.items() if not e]
+        if sem:
+            _info(f"Ainda sem Gmail: <b>{_e(', '.join(sem))}</b>. Quem ficar sem não consegue entrar depois "
+                  "de ligar.", "cx-falta")
+        if st.button("Ligar entrada com Google para todos", key="cf_gg_ligar", type="primary",
+                     icon=":material/verified_user:", use_container_width=True):
+            if _config_varias({"login_google": "sim"}):
+                _flash("Entrada com Google ligada")
+                st.rerun()
+
+
 def tela_config():
-    _cabecalho("Configurações", voltar_para="inicio", subtitulo="Quem usa o app e em quais aparelhos")
+    _cabecalho("Configurações", voltar_para="inicio", subtitulo="Quem usa o app e como entra")
     if not _sou_admin():
         st.info("Só o administrador do app abre esta tela.")
         return
@@ -655,11 +829,20 @@ def tela_config():
     pessoas = pessoas_da_config(cfg)
     presos = aparelhos_por_pessoa(cfg)
     adm = administrador(cfg)
+    com_google = _login_configurado()
+    ligado = com_google and login_google_ligado(cfg)
+    emails = emails_por_pessoa(cfg)
+
+    if com_google:
+        _secao_google(cfg, adm)
 
     for i, p in enumerate(pessoas):
         n = len(presos[p])
         liberado = chave_busca(cfg.get(f"liberado:{p}", "")) == "sim"
-        if liberado:
+        if ligado:
+            estado = ("<span class='sit c-ok'>Com Gmail</span>" if emails[p]
+                      else "<span class='sit c-atraso'>Sem Gmail</span>")
+        elif liberado:
             estado = "<span class='sit c-breve'>Liberado para 1 aparelho novo</span>"
         elif n:
             estado = f"<span class='sit c-ok'>{n} aparelho{'s' if n > 1 else ''}</span>"
@@ -669,32 +852,51 @@ def tela_config():
         with st.container(key=f"sec_cf_{i}"):
             st.markdown(f"<div class='nt-pessoa'><span>{_e(p)}{' · administrador' if p == adm else ''}</span>{estado}</div>"
                         f"<div class='cf-meta'>{telegram}</div>", unsafe_allow_html=True)
-            c1, c2 = st.columns(2)
-            with c1:
-                if n and not liberado and st.button("Liberar novo aparelho", key=f"cf_lib_{i}",
-                                                    icon=":material/add_to_home_screen:", use_container_width=True):
-                    if _config_varias({f"liberado:{p}": "sim"}):
-                        _flash(f"{p} pode escolher o nome em mais um aparelho")
-                        st.rerun()
-                if liberado and st.button("Cancelar liberação", key=f"cf_canc_{i}", icon=":material/block:",
-                                          use_container_width=True):
-                    if _config_varias({f"liberado:{p}": ""}):
-                        st.rerun()
-            with c2:
-                # O administrador não desliga o próprio aparelho (ficaria sem a tela de Configurações)
-                if n and p != adm and st.button("Desligar aparelhos", key=f"cf_des_{i}",
-                                                icon=":material/phonelink_erase:", use_container_width=True,
-                                                help="Os aparelhos dessa pessoa perdem o acesso; o nome fica livre para ela escolher de novo."):
-                    if _config_varias({f"aparelho:{a}": "" for a in presos[p]}):
-                        _flash(f"Aparelhos de {p} desligados")
-                        st.rerun()
+            if com_google:
+                erro = f"_cf_email_erro_{i}"
+                if ligado and p == adm:
+                    # Com a entrada ligada, o administrador não troca o próprio Gmail (ficaria do lado de fora)
+                    st.markdown(f"<div class='cf-meta'>Gmail: <b>{_e(emails[p])}</b> (para trocar, desligue a "
+                                "entrada com Google antes)</div>", unsafe_allow_html=True)
+                else:
+                    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+                    with c1:
+                        novo = st.text_input(f"Gmail de {p}", value=emails[p], key=f"cf_email_{i}_{emails[p]}",
+                                             placeholder="nome@gmail.com", max_chars=80)
+                    with c2:
+                        if st.button("Salvar", key=f"cf_email_ok_{i}", use_container_width=True):
+                            if normalizar_email(novo) != emails[p] and _salvar_email(p, novo, erro):
+                                _flash(f"Gmail de {p} salvo" if novo.strip() else f"Gmail de {p} apagado")
+                                st.rerun()
+                    if st.session_state.get(erro):
+                        _erro_campo(st.session_state[erro])
+            if not ligado:
+                c1, c2 = st.columns(2)
+                with c1:
+                    if n and not liberado and st.button("Liberar novo aparelho", key=f"cf_lib_{i}",
+                                                        icon=":material/add_to_home_screen:", use_container_width=True):
+                        if _config_varias({f"liberado:{p}": "sim"}):
+                            _flash(f"{p} pode escolher o nome em mais um aparelho")
+                            st.rerun()
+                    if liberado and st.button("Cancelar liberação", key=f"cf_canc_{i}", icon=":material/block:",
+                                              use_container_width=True):
+                        if _config_varias({f"liberado:{p}": ""}):
+                            st.rerun()
+                with c2:
+                    # O administrador não desliga o próprio aparelho (ficaria sem a tela de Configurações)
+                    if n and p != adm and st.button("Desligar aparelhos", key=f"cf_des_{i}",
+                                                    icon=":material/phonelink_erase:", use_container_width=True,
+                                                    help="Os aparelhos dessa pessoa perdem o acesso; o nome fica livre para ela escolher de novo."):
+                        if _config_varias({f"aparelho:{a}": "" for a in presos[p]}):
+                            _flash(f"Aparelhos de {p} desligados")
+                            st.rerun()
             if p != adm and st.button(f"Remover {p}", key=f"cf_rem_{i}", type="tertiary", icon=":material/person_remove:"):
                 st.session_state["_cf_remover"] = p
                 st.rerun()
 
     alvo = st.session_state.get("_cf_remover")
     if alvo in pessoas and alvo != adm:
-        _info(f"Remover <b>{_e(alvo)}</b>? Os aparelhos e o Telegram dessa pessoa são desligados. "
+        _info(f"Remover <b>{_e(alvo)}</b>? Os aparelhos, o Gmail e o Telegram dessa pessoa são desligados. "
               "O que ela já registrou continua com o nome dela.", "cx-perigo")
         c1, c2 = st.columns(2)
         with c1:
@@ -705,6 +907,8 @@ def tela_config():
             if st.button("Sim, remover", key="cf_rem_sim", use_container_width=True):
                 pares = {"pessoas": ", ".join(x for x in pessoas if x != alvo), f"telegram:{alvo}": "",
                          f"liberado:{alvo}": ""}
+                if cfg.get(f"email:{alvo}"):
+                    pares[f"email:{alvo}"] = ""
                 pares.update({f"aparelho:{a}": "" for a in presos[alvo]})
                 st.session_state.pop("_cf_remover", None)
                 if _config_varias(pares):
@@ -714,18 +918,37 @@ def tela_config():
     with st.container(key="sec_cf_nova"):
         _titulo_secao(len(pessoas) + 1, "Adicionar pessoa")
         novo = st.text_input("Nome", key="cf_novo", max_chars=MAX_NOME, placeholder="Ex.: Gabi")
+        gmail = (st.text_input("Gmail", key="cf_novo_email", max_chars=80, placeholder="nome@gmail.com",
+                               help="O Gmail com que ela vai entrar no app.")
+                 if com_google else "")
         if st.button("Adicionar", key="cf_add", type="primary", icon=":material/person_add:",
                      use_container_width=True):
             nome = " ".join(novo.replace(",", " ").replace(":", " ").split())
+            gmail = normalizar_email(gmail)
             if len(nome) < 2:
                 _erro_campo("Digite o nome.")
             elif any(chave_busca(x) == chave_busca(nome) for x in pessoas):
                 _erro_campo("Já existe uma pessoa com esse nome.")
-            elif _config_varias({"pessoas": ", ".join(pessoas + [nome])}):
-                _flash(f"{nome} adicionada. Peça para ela abrir o app e escolher o nome.")
-                st.rerun()
-    _info("Quando a pessoa abre o app pela primeira vez, ela escolhe o nome e aquele aparelho fica preso "
-          "nele. Se trocar de celular, toque em <b>Liberar novo aparelho</b>.", "cx-nota")
+            elif ligado and not gmail:
+                _erro_campo("Com a entrada com Google ligada, a pessoa precisa de um Gmail para entrar.")
+            elif gmail and not email_valido(gmail):
+                _erro_campo("Esse e-mail não parece certo. Ex.: nome@gmail.com")
+            elif gmail and dono_do_email(cfg, gmail):
+                _erro_campo(f"Esse Gmail já é de {dono_do_email(cfg, gmail)}.")
+            else:
+                pares = {"pessoas": ", ".join(pessoas + [nome])}
+                if gmail:
+                    pares[f"email:{nome}"] = gmail
+                if _config_varias(pares):
+                    _flash(f"{nome} adicionada. " + ("Peça para ela entrar com esse Gmail." if ligado
+                                                     else "Peça para ela abrir o app e escolher o nome."))
+                    st.rerun()
+    if ligado:
+        _info("Cada pessoa entra com o próprio Gmail, em qualquer aparelho. Para tirar o acesso de alguém, "
+              "apague o Gmail dela ou remova a pessoa.", "cx-nota")
+    else:
+        _info("Quando a pessoa abre o app pela primeira vez, ela escolhe o nome e aquele aparelho fica preso "
+              "nele. Se trocar de celular, toque em <b>Liberar novo aparelho</b>.", "cx-nota")
 
 
 # ── Nova cobrança: escolher o tipo ────────────────────────────────────────────
@@ -2723,7 +2946,10 @@ function instalar() {
     document.querySelectorAll('.stTextInput input:not([data-cap]):not([data-rs]), .stTextArea textarea:not([data-cap])')
       .forEach(function (el) {
         el.setAttribute("data-cap", "1");
-        if (!el.closest(".st-key-quem_novo, .st-key-cf_novo")) el.setAttribute("autocapitalize", "characters");
+        if (el.closest('[class*="email"]')) {   // Gmail: teclado de e-mail, sem maiúscula
+          el.setAttribute("autocapitalize", "none");
+          el.setAttribute("inputmode", "email");
+        } else if (!el.closest(".st-key-quem_novo, .st-key-cf_novo")) el.setAttribute("autocapitalize", "characters");
       });
   }
   var agendado = false;

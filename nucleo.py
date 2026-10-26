@@ -818,6 +818,44 @@ def nome_do_aparelho(config: dict, aparelho: str) -> str:
     return nome if nome in pessoas_da_config(config) else ""
 
 
+# ── Entrada com Google (pedido 26/10) ─────────────────────────────────────────
+# Cada pessoa ligada a UM Gmail; quem entra com aquele Gmail, em qualquer aparelho,
+# é aquela pessoa. Fica na _Config (os e-mails NUNCA vão para o código: o repositório
+# da demonstração é público):
+#   email:<nome>     Gmail daquela pessoa
+#   login_google     "sim" = a entrada com Google vale para todo mundo (no lugar do aparelho)
+
+def normalizar_email(txt) -> str:
+    return _txt(txt).strip().lower()
+
+
+def email_valido(txt) -> bool:
+    return bool(re.fullmatch(r"[^@\s,:]+@[^@\s,:]+\.[a-z]{2,}", normalizar_email(txt)))
+
+
+def emails_por_pessoa(config: dict) -> dict[str, str]:
+    """{nome: email} de quem está na lista de pessoas ('' se ainda não tem)."""
+    return {p: normalizar_email(config.get(f"email:{p}")) for p in pessoas_da_config(config)}
+
+
+def pessoa_do_email(config: dict, email: str) -> str:
+    """Nome ligado àquele Gmail ('' se nenhum). Só vale para quem ainda está na lista."""
+    alvo = normalizar_email(email)
+    if not alvo:
+        return ""
+    return next((p for p, e in emails_por_pessoa(config).items() if e == alvo), "")
+
+
+def dono_do_email(config: dict, email: str, menos: str = "") -> str:
+    """Outra pessoa que já usa esse Gmail (para não ligar o mesmo e-mail em dois nomes)."""
+    alvo = normalizar_email(email)
+    return next((p for p, e in emails_por_pessoa(config).items() if e == alvo and p != menos), "")
+
+
+def login_google_ligado(config: dict) -> bool:
+    return chave_busca(config.get("login_google", "")) == "sim"
+
+
 def nomes_livres(config: dict) -> list[str]:
     """Nomes que um aparelho novo pode escolher: sem aparelho preso, ou liberados pelo administrador."""
     presos = aparelhos_por_pessoa(config)

@@ -99,6 +99,8 @@ header[data-testid="stHeader"] { display: none; }
 .stTextInput input, .stTextArea textarea { text-transform: uppercase; }
 .stTextInput input::placeholder, .stTextArea textarea::placeholder { text-transform: none; }
 .st-key-quem_novo input, .st-key-cf_novo input { text-transform: none; }
+/* Gmail fica como é (minúsculo): toda chave de campo de e-mail tem "email" no nome */
+[class*="email"] input { text-transform: none; }
 .cx-vazio  { text-align: center; color: var(--apoio); padding: 28px 12px; font-size: .95rem; }
 
 /* ── Tela inicial e escolha Pix/Cartão ───────────────────────────────────── */
