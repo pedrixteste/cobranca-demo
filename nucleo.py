@@ -72,7 +72,8 @@ SITUACAO_ATIVA    = "Ativa"
 SITUACAO_EXCLUIDA = "Excluída"
 
 COBRANCAS_HEADERS = ["ID", "Tipo", "Cliente", "Turma", "Treinamento", "Valor Total",
-                     "Criada em", "Criada por", "Situação", "Excluída em", "Observações", "Cidade"]
+                     "Criada em", "Criada por", "Situação", "Excluída em", "Observações", "Cidade",
+                     "Telefone"]
 PARCELAS_HEADERS = ["ID Cobrança", "Nº", "Vencimento", "Valor", "Status", "Pago em",
                     "Comprovante", "Marcado por", "Registrado em", "Observação", "Vezes no cartão",
                     "Forma", "Produto"]
@@ -570,6 +571,7 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "criada_em": parse_data(c.get("Criada em")),
             "criada_por": _txt(c.get("Criada por")),
             "cidade": _txt(c.get("Cidade")),   # texto livre: "Lajeado", "Laj", "SCS"...
+            "telefone": _txt(c.get("Telefone")),   # opcional (pedido 26/10): "(51) 99999-8888"
             "observacoes": _txt(c.get("Observações")),
             # tem anotação na cobrança OU em alguma parcela (ex.: "pago em permuta")
             "tem_obs": bool(_txt(c.get("Observações")) or any(p["observacao"] for p in ps)),
@@ -586,6 +588,76 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "situacao": sit,
         })
     return saida
+
+
+# ── Telefone do cliente (opcional, pedido 26/10) ──────────────────────────────
+# Gravado já formatado, "(51) 99999-8888": com parênteses a planilha nunca o
+# confunde com número (e nunca come zero da frente).
+
+def _estrangeiro(txt) -> bool:
+    """'+1 415…' é de fora; '+55…' é do Brasil."""
+    t = _txt(txt).lstrip()
+    return t.startswith("+") and not re.sub(r"\D", "", t).startswith("55")
+
+
+def digitos_telefone(txt) -> str:
+    """Só os números; tira o 55 do Brasil quando vem junto (5551999998888)."""
+    d = re.sub(r"\D", "", _txt(txt))
+    if not _estrangeiro(txt) and d.startswith("55") and len(d) in (12, 13):
+        d = d[2:]
+    return d
+
+
+def formatar_telefone(txt) -> str:
+    """'51999998888' → '(51) 99999-8888'; '5133334444' → '(51) 3333-4444'; sem DDD fica
+    '99999-8888'. O que não parece telefone brasileiro fica como foi escrito."""
+    bruto = " ".join(_txt(txt).split())
+    if _estrangeiro(bruto):
+        return bruto
+    d = digitos_telefone(bruto)
+    if len(d) == 11:
+        return f"({d[:2]}) {d[2:7]}-{d[7:]}"
+    if len(d) == 10:
+        return f"({d[:2]}) {d[2:6]}-{d[6:]}"
+    if len(d) == 9:
+        return f"{d[:5]}-{d[5:]}"
+    if len(d) == 8:
+        return f"{d[:4]}-{d[4:]}"
+    return bruto
+
+
+def telefone_valido(txt) -> bool:
+    """Vazio vale (é opcional). Preenchido precisa ter de 8 a 13 números."""
+    d = re.sub(r"\D", "", _txt(txt))
+    return not _txt(txt) or 8 <= len(d) <= 13
+
+
+def link_whatsapp(txt) -> str:
+    """https://wa.me/5551999998888, só quando tem DDD (10 ou 11 números)."""
+    d = digitos_telefone(txt)
+    if _estrangeiro(txt):
+        return f"https://wa.me/{d}" if len(d) >= 8 else ""
+    return f"https://wa.me/55{d}" if len(d) in (10, 11) else ""
+
+
+def link_ligar(txt) -> str:
+    d = digitos_telefone(txt)
+    if len(d) < 8:
+        return ""
+    if _estrangeiro(txt):
+        return f"tel:+{d}"
+    return f"tel:{'+55' + d if len(d) in (10, 11) else d}"
+
+
+def telefone_do_cliente(cobs: list[dict], cliente: str) -> str:
+    """Telefone já anotado em outra cobrança do mesmo cliente ('' se nenhuma tem)."""
+    alvo = chave_busca(cliente)
+    if not alvo:
+        return ""
+    for c in cobs:
+        if chave_busca(c["cliente"]) == alvo and c.get("telefone") and not c.get("excluida"):
+            return c["telefone"]
+    return ""
 
 
 def cidade_da_turma(cobs: list[dict], turma: str) -> str:
@@ -626,7 +698,9 @@ def casa_busca(c: dict, termo: str) -> bool:
         return True
     notas = " ".join([c.get("observacoes", "")] + [p.get("observacao", "") for p in c.get("parcelas", [])]
                      + [p.get("produto", "") for p in c.get("parcelas", [])])
-    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {c.get('cidade', '')} {notas}")
+    tel = c.get("telefone", "")
+    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {c.get('cidade', '')} {notas}"
+                       f" {tel} {digitos_telefone(tel)}")
     return all(palavra in alvo for palavra in chave_busca(termo).split())
 
 

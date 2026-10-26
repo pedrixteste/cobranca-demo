@@ -73,7 +73,7 @@ with sync_playwright() as p:
     # 1. cadastro com cidade
     dica = cadastrar_pix(page, "Larissa Cidade", "l700", "  Lajeado  ")
     ordem = [x.get_attribute("aria-label") for x in page.locator(".st-key-sec_px1 input").all()]
-    confere("campo Cidade fica logo abaixo da Turma", ordem == ["Nome do cliente", "Turma", "Cidade da turma"], str(ordem))
+    confere("campo Cidade fica logo abaixo da Turma", ordem == ["Nome do cliente", "Telefone (opcional)", "Turma", "Cidade da turma"], str(ordem))
     confere("turma nova não tem sugestão de cidade", dica == "", dica)
     page.screenshot(path=str(OUT / "cidade_1_form.png"))
     botao(page, "Salvar cobrança"); esperar(page, 2500)

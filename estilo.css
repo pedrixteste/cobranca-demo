@@ -319,6 +319,9 @@ header[data-testid="stHeader"] { display: none; }
 .fc-aviso { margin-top: 8px; font-size: .8rem; color: var(--breve); }
 .fc-quem  { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--linha); font-size: .8rem; color: var(--apoio); }
 .fc-quem b { color: var(--tinta); font-weight: 600; }
+/* Telefone do cliente no topo da ficha (pedido 26/10) */
+.fc-tel { margin: -.3rem 0 .1rem; }
+.fc-tel-num { font-family: var(--mono); font-weight: 600; font-size: 1rem; color: var(--tinta); letter-spacing: .01em; }
 .pc-quem  { font-size: .78rem; color: var(--ok-texto); }
 .st-key-btn_trocar_pessoa button { color: var(--apoio); }
 

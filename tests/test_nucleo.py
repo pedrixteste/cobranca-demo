@@ -316,6 +316,56 @@ class Cidade(unittest.TestCase):
         self.assertIn("(L345 · Lajeado)", notifier.montar_diario(cobs, HOJE))
 
 
+class Telefone(unittest.TestCase):
+    """Telefone do cliente, opcional (pedido 26/10)."""
+
+    def test_formata_celular_fixo_e_sem_ddd(self):
+        self.assertEqual(n.formatar_telefone("51999998888"), "(51) 99999-8888")
+        self.assertEqual(n.formatar_telefone("(51) 9 9999-8888"), "(51) 99999-8888")
+        self.assertEqual(n.formatar_telefone("+55 51 99999 8888"), "(51) 99999-8888")
+        self.assertEqual(n.formatar_telefone("5133334444"), "(51) 3333-4444")
+        self.assertEqual(n.formatar_telefone("999998888"), "99999-8888")
+        self.assertEqual(n.formatar_telefone("  "), "")
+
+    def test_estrangeiro_fica_como_foi_escrito(self):
+        self.assertEqual(n.formatar_telefone("+1 415 555  0100"), "+1 415 555 0100")
+        self.assertEqual(n.link_whatsapp("+1 415 555 0100"), "https://wa.me/14155550100")
+        self.assertEqual(n.link_ligar("+1 415 555 0100"), "tel:+14155550100")
+        self.assertEqual(n.formatar_telefone("+55 51 3333 4444"), "(51) 3333-4444")
+
+    def test_validade(self):
+        self.assertTrue(n.telefone_valido(""))
+        self.assertTrue(n.telefone_valido("51999998888"))
+        self.assertFalse(n.telefone_valido("5199"))
+        self.assertFalse(n.telefone_valido("abc"))
+
+    def test_links(self):
+        self.assertEqual(n.link_whatsapp("(51) 99999-8888"), "https://wa.me/5551999998888")
+        self.assertEqual(n.link_whatsapp("99999-8888"), "")          # sem DDD não dá para o WhatsApp
+        self.assertEqual(n.link_ligar("(51) 99999-8888"), "tel:+5551999998888")
+        self.assertEqual(n.link_ligar("99999-8888"), "tel:999998888")
+        self.assertEqual(n.link_ligar(""), "")
+
+    def test_lido_da_planilha_e_achado_na_busca(self):
+        cobs = n.montar_cobrancas([{**cob("a1", cliente="Maria"), "Telefone": "(51) 99999-8888"},
+                                   cob("b2", cliente="João")],
+                                  [parc(i, 1, "20/10/2026", "100,00") for i in ("a1", "b2")], HOJE)
+        self.assertEqual([c["telefone"] for c in cobs], ["(51) 99999-8888", ""])
+        for termo in ("99999-8888", "51999998888", "999998888"):
+            self.assertEqual([c["cliente"] for c in n.filtrar(cobs, termo)], ["Maria"], termo)
+
+    def test_sugere_o_telefone_de_outra_cobranca_do_cliente(self):
+        cobs = n.montar_cobrancas([{**cob("a1", cliente="MARIA SILVA"), "Telefone": "(51) 99999-8888"},
+                                   cob("b2", cliente="João")],
+                                  [parc(i, 1, "20/10/2026", "100,00") for i in ("a1", "b2")], HOJE)
+        self.assertEqual(n.telefone_do_cliente(cobs, "maria  silva"), "(51) 99999-8888")
+        self.assertEqual(n.telefone_do_cliente(cobs, "João"), "")
+        self.assertEqual(n.telefone_do_cliente(cobs, ""), "")
+
+    def test_coluna_nova_no_fim(self):
+        self.assertEqual(n.COBRANCAS_HEADERS[-1], "Telefone")
+
+
 class Hibrido(unittest.TestCase):
     """Pagamento híbrido: uma parte no Pix e outra no cartão, na mesma cobrança."""
 

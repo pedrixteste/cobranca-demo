@@ -50,6 +50,7 @@ import notifier
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
                     administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
                     cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
+                    formatar_telefone, link_ligar, link_whatsapp, telefone_do_cliente, telefone_valido,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
                     TIPO_PERMUTA, TIPO_CREDITO, parcelas_permuta, permutas_do_cliente,
@@ -765,6 +766,13 @@ def _tirar_turma(prefixo: str, i: int):
     st.session_state[f"{prefixo}n_turmas"] = max(n - 1, 1)
 
 
+CHAVE_TEL = "telefone__tel"   # o fim "__tel" faz o script _JS_CAMPOS abrir o teclado de telefone
+
+
+def _usar_telefone(prefixo: str, tel: str):
+    st.session_state[f"{prefixo}{CHAVE_TEL}"] = tel
+
+
 def _bloco_cliente(prefixo: str):
     """
     Cliente + turma(s): o treinamento sai da letra de cada turma. A cobrança pode valer para mais
@@ -775,6 +783,20 @@ def _bloco_cliente(prefixo: str):
     _titulo_secao(1, "Cliente")
     cliente = st.text_input("Nome do cliente", key=f"{prefixo}cliente").strip()
     turmas, erros = [], []
+    # Telefone opcional (pedido 26/10), para facilitar falar com a pessoa. Vai junto no
+    # _salvar, lido de st.session_state[f"{prefixo}{CHAVE_TEL}"].
+    tel = st.text_input("Telefone (opcional)", key=f"{prefixo}{CHAVE_TEL}", max_chars=25,
+                        placeholder="Ex.: (51) 99999-8888", help="Para ligar ou chamar no WhatsApp pela ficha.")
+    if not telefone_valido(tel):
+        _erro_campo("Telefone incompleto. Ex.: (51) 99999-8888, ou deixe em branco.")
+        erros.append("Telefone incompleto (ou deixe em branco).")
+    elif not tel.strip():
+        de_outra = telefone_do_cliente(_cobrancas() or [], cliente)
+        if de_outra:
+            st.markdown(f"<div class='cx-dica'>Outra cobrança de {_e(cliente.upper())} tem o telefone "
+                        f"<b>{_e(de_outra)}</b>.</div>", unsafe_allow_html=True)
+            st.button("Usar esse telefone", key=f"{prefixo}usar_tel", icon=":material/call:", type="tertiary",
+                      on_click=_usar_telefone, args=(prefixo, de_outra))
     for i in range(st.session_state.get(f"{prefixo}n_turmas", 1)):
         if i == 0:
             txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345",
@@ -840,7 +862,8 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
             {"Tipo": tipo, "Cliente": cliente.upper(), "Turma": turma, "Treinamento": treino,
              "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
              "Observações": observacoes.strip().upper(),
-             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split()).upper()},
+             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split()).upper(),
+             "Telefone": formatar_telefone(st.session_state.get(f"{prefixo}{CHAVE_TEL}", ""))},
             parcelas,
         )
     except Exception as e:
@@ -1972,6 +1995,10 @@ def _dlg_editar(cid: str):
         return
     k = f"_ed_{cid}"
     cliente = st.text_input("Nome do cliente", value=c["cliente"], key=f"{k}_cli").strip()
+    tel = st.text_input("Telefone (opcional)", value=c["telefone"], key=f"{k}_{CHAVE_TEL}", max_chars=25,
+                        placeholder="Ex.: (51) 99999-8888")
+    if not telefone_valido(tel):
+        _erro_campo("Telefone incompleto. Ex.: (51) 99999-8888, ou deixe em branco.")
     turma_txt = st.text_input("Turma", value=c["turma"], key=f"{k}_turma",
                               help="Mais de uma turma: separe com vírgula. Ex.: L345, V12")
     turmas = normalizar_turmas(turma_txt)
@@ -1990,12 +2017,13 @@ def _dlg_editar(cid: str):
                              help="Em branco = continua o mesmo.")
     obs = st.text_area("Observações", value=c["observacoes"], key=f"{k}_obs", height=80)
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
-        if not cliente or not turmas or not ok_t:
-            st.error("Confira o nome, a turma e o valor.")
+        if not cliente or not turmas or not ok_t or not telefone_valido(tel):
+            st.error("Confira o nome, o telefone, a turma e o valor.")
             return
         campos = {"Cliente": cliente.upper(), "Turma": SEP_TURMAS_PLANILHA.join(turmas),
                   "Treinamento": SEP_TURMAS_PLANILHA.join(treinamentos_das_turmas(turmas)),
-                  "Observações": obs.strip().upper(), "Cidade": " ".join(cidade.split()).upper()}
+                  "Observações": obs.strip().upper(), "Cidade": " ".join(cidade.split()).upper(),
+                  "Telefone": formatar_telefone(tel)}
         if total:
             campos["Valor Total"] = total
         try:
@@ -2035,6 +2063,23 @@ def _dlg_excluir(cid: str):
 
 # ── Ficha da cobrança ─────────────────────────────────────────────────────────
 
+def _contato(c: dict):
+    """Telefone do cliente no topo da ficha, com Ligar e WhatsApp (pedido 26/10)."""
+    tel = c.get("telefone", "")
+    if not tel:
+        return
+    with st.container(key="fc_contato"):
+        st.markdown(f"<div class='fc-tel'><span class='fc-tel-num'>{_e(tel)}</span></div>", unsafe_allow_html=True)
+        ligar, whats = link_ligar(tel), link_whatsapp(tel)
+        cols = st.columns(2) if ligar and whats else [st.container()]
+        if ligar:
+            with cols[0]:
+                st.link_button("Ligar", ligar, icon=":material/call:", use_container_width=True)
+        if whats:
+            with cols[-1]:
+                st.link_button("WhatsApp", whats, icon=":material/chat:", use_container_width=True)
+
+
 def tela_cobranca():
     hoje = _hoje()
     cid = st.session_state.get("cob_id")
@@ -2046,6 +2091,7 @@ def tela_cobranca():
         return
     _cabecalho(c["cliente"], voltar_para=volta,
                subtitulo=f"Turma {_e(local_da_cobranca(c))} · {_e(c['tipo'])}")
+    _contato(c)
     if c["permuta"]:
         _ficha_permuta(c)
         return
@@ -2667,6 +2713,12 @@ function instalar() {
       el.addEventListener("input", function () { if (!mexendo) formatar(el); });
       el.addEventListener("focus", function () { cursorNoInteiro(el); });
       el.addEventListener("click", function () { cursorNoInteiro(el); });
+    });
+    // Telefone (chave termina em "__tel"): teclado de telefone no celular
+    document.querySelectorAll('[class*="__tel"] input:not([data-tel])').forEach(function (el) {
+      el.setAttribute("data-tel", "1");
+      el.setAttribute("inputmode", "tel");
+      el.setAttribute("autocomplete", "off");
     });
     document.querySelectorAll('.stTextInput input:not([data-cap]):not([data-rs]), .stTextArea textarea:not([data-cap])')
       .forEach(function (el) {
