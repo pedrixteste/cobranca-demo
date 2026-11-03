@@ -913,3 +913,237 @@ def avisos(cobs: list[dict], hoje: date) -> dict:
     # Mais atrasado primeiro
     r["atrasadas"].sort(key=lambda it: it[0]["vencimento"])
     return r
+
+
+# ── Jurídico (pedido 03/11) ───────────────────────────────────────────────────
+# Duas listas à parte, cada uma na sua aba:
+#   _Judicial   cliente que a Vithall colocou na justiça por não pagar: o que foi cobrado,
+#               desde quando está com o jurídico, o advogado e o ACORDO (à vista ou parcelado)
+#   _Protestos  título (cheque, promissória ou ficha) protestado em cartório, e se já foi pago
+# Nada daqui entra no relatório de cobranças, na agenda nem nos avisos do Telegram.
+#
+# As parcelas do acordo ficam numa célula só (coluna "Acordo"), uma por linha:
+#     1 | 500,00 | 10/12/2026 | Paga | 08/12/2026 | ANA
+#     2 | 500,00 | 10/01/2027
+# (número | valor | vencimento | Paga | pago em | quem marcou). Uma célula só = mudar o
+# acordo é UMA gravação, e o acordo nunca fica pela metade na planilha.
+
+OBJETOS = ["Cheque", "Promissória", "Ficha"]
+
+NEG_SEM       = ""            # ainda sem acordo
+NEG_A_VISTA   = "À vista"
+NEG_PARCELADO = "Parcelado"
+
+JUD_SEM_ACORDO = "sem_acordo"   # situação da cobrança judicial que ainda não tem acordo
+ROTULO_JUD = {JUD_SEM_ACORDO: "Sem acordo", **ROTULO_CLI}
+_GRAVIDADE_JUD = {CLI_ATRASADO: 0, CLI_EM_BREVE: 1, JUD_SEM_ACORDO: 2, CLI_EM_DIA: 3, CLI_QUITADO: 4}
+
+JUDICIAL_HEADERS = ["ID", "Cliente", "Turma", "Objeto", "Valor cobrado", "No jurídico desde", "Advogado",
+                    "Negociação", "Valor do acordo", "Acordo", "Cadastrada por", "Criada em",
+                    "Situação", "Excluída em"]
+PROTESTOS_HEADERS = ["ID", "Cliente", "Turma", "Objeto", "Protestado em", "Pago", "Pago em", "Marcado por",
+                     "Cadastrado por", "Criado em", "Situação", "Excluído em"]
+
+_SEP_ACORDO = " | "
+
+
+def _limpo_acordo(txt) -> str:
+    """Texto que vai dentro da célula do acordo: sem '|' nem quebra de linha (que separam as partes)."""
+    return " ".join(_txt(txt).replace("|", " ").split())
+
+
+def acordo_para_texto(parcelas: list[dict]) -> str:
+    """Parcelas do acordo → o texto da célula "Acordo" (ver o começo desta seção)."""
+    linhas = []
+    for i, p in enumerate(parcelas, start=1):
+        partes = [str(i), valor_planilha(p.get("valor") or 0.0), data_br(p.get("vencimento"))]
+        if p.get("paga"):
+            partes += [STATUS_PAGA, data_br(p.get("pago_em")), _limpo_acordo(p.get("marcado_por"))]
+        while partes and not partes[-1]:
+            partes.pop()
+        linhas.append(_SEP_ACORDO.join(partes))
+    return "\n".join(linhas)
+
+
+def acordo_do_texto(txt) -> list[dict]:
+    """O contrário de acordo_para_texto. Linha ilegível (mexida à mão) vira parcela de R$ 0,00 sem
+    data, para continuar aparecendo na tela em vez de sumir calada."""
+    parcelas = []
+    for linha in _txt(txt).splitlines():
+        partes = [x.strip() for x in linha.split("|")]
+        if not any(partes):
+            continue
+        partes += [""] * (6 - len(partes))
+        paga = chave_busca(partes[3]) == chave_busca(STATUS_PAGA)
+        parcelas.append({
+            "valor": valor_para_float(partes[1]) or 0.0,
+            "vencimento": parse_data(partes[2]),
+            "paga": paga,
+            "pago_em": parse_data(partes[4]) if paga else None,
+            "marcado_por": partes[5] if paga else "",
+        })
+    return parcelas
+
+
+def parcelas_do_acordo(valores: list[float], datas: list, anteriores: list[dict] = ()) -> list[dict]:
+    """
+    Parcelas novas do acordo (cadastro ou edição). Na edição, a parcela que JÁ estava paga continua
+    paga (com a data e quem marcou), pela posição: a 1ª continua sendo a 1ª.
+    """
+    ps = []
+    for i, (v, d) in enumerate(zip(valores, datas)):
+        ant = anteriores[i] if i < len(anteriores) else {}
+        paga = bool(ant.get("paga"))
+        ps.append({"valor": v, "vencimento": d, "paga": paga,
+                   "pago_em": ant.get("pago_em") if paga else None,
+                   "marcado_por": ant.get("marcado_por", "") if paga else ""})
+    return ps
+
+
+def marcar_parcela_acordo(parcelas: list[dict], n: int, paga: bool, quando: date | None = None,
+                          quem: str = "") -> list[dict]:
+    """Cópia das parcelas com a n-ésima (1, 2, 3...) marcada como paga, ou desmarcada."""
+    novas = [dict(p) for p in parcelas]
+    if 1 <= n <= len(novas):
+        novas[n - 1].update({"paga": paga, "pago_em": quando if paga else None,
+                             "marcado_por": quem if paga else ""})
+    return novas
+
+
+def _turmas_da_linha(texto) -> list[str]:
+    return normalizar_turmas(texto) or ([_txt(texto)] if _txt(texto) else [])
+
+
+def montar_judiciais(linhas: list[dict], hoje: date, incluir_excluidas: bool = False) -> list[dict]:
+    """Linhas da aba _Judicial → o que a tela mostra (com as contas do acordo)."""
+    saida = []
+    for l in linhas:
+        jid = _txt(l.get("ID"))
+        if not jid:
+            continue
+        excluida = _txt(l.get("Situação")) == SITUACAO_EXCLUIDA
+        if excluida and not incluir_excluidas:
+            continue
+        neg = _txt(l.get("Negociação"))
+        ps = acordo_do_texto(l.get("Acordo")) if neg in (NEG_A_VISTA, NEG_PARCELADO) else []
+        if not ps:
+            neg = NEG_SEM
+        for i, p in enumerate(ps, start=1):
+            p["n"] = i
+            p["situacao"] = situacao_parcela(p, hoje)
+            p["rotulo"] = "Acordo à vista" if neg == NEG_A_VISTA else f"Parcela {i} de {len(ps)}"
+        pago = sum(p["valor"] for p in ps if p["paga"])
+        falta = sum(p["valor"] for p in ps if not p["paga"])
+        atrasadas = [p for p in ps if p["situacao"] == SIT_ATRASADA]
+        futuras = sorted((p for p in ps if not p["paga"] and p["vencimento"] and p["vencimento"] >= hoje),
+                         key=lambda p: p["vencimento"])
+        if not ps:
+            sit = JUD_SEM_ACORDO
+        elif atrasadas:
+            sit = CLI_ATRASADO
+        elif all(p["paga"] for p in ps):
+            sit = CLI_QUITADO
+        elif any(p["situacao"] == SIT_EM_BREVE for p in ps):
+            sit = CLI_EM_BREVE
+        else:
+            sit = CLI_EM_DIA
+        turmas = _turmas_da_linha(l.get("Turma"))
+        saida.append({
+            "id": jid,
+            "cliente": _txt(l.get("Cliente")),
+            "turma": SEP_TURMAS_TELA.join(turmas),   # "L345" ou "L345 + V12"
+            "turmas": turmas,
+            "objeto": _txt(l.get("Objeto")),
+            "valor": valor_para_float(l.get("Valor cobrado")) or 0.0,
+            "desde": parse_data(l.get("No jurídico desde")),
+            "advogado": _txt(l.get("Advogado")),
+            "negociacao": neg,
+            "valor_acordo": valor_para_float(l.get("Valor do acordo")) or sum(p["valor"] for p in ps),
+            "parcelas": ps,
+            "pago": pago,
+            "falta": falta,
+            "atrasado": sum(p["valor"] for p in atrasadas),
+            "dias_atraso": max(((hoje - p["vencimento"]).days for p in atrasadas), default=0),
+            "proxima": futuras[0] if futuras else None,
+            "situacao": sit,
+            "criada_por": _txt(l.get("Cadastrada por")),
+            "criada_em": parse_data(l.get("Criada em")),
+            "excluida": excluida,
+            "excluida_em": parse_data(l.get("Excluída em")),
+        })
+    return saida
+
+
+def ordenar_judiciais(itens: list[dict]) -> list[dict]:
+    """Atrasado primeiro, depois vence em breve, sem acordo, em dia e quitado; dentro de cada um, pelo nome."""
+    return sorted(itens, key=lambda j: (_GRAVIDADE_JUD.get(j["situacao"], 9), chave_busca(j["cliente"])))
+
+
+def montar_protestos(linhas: list[dict], incluir_excluidos: bool = False) -> list[dict]:
+    saida = []
+    for l in linhas:
+        pid = _txt(l.get("ID"))
+        if not pid:
+            continue
+        excluido = _txt(l.get("Situação")) == SITUACAO_EXCLUIDA
+        if excluido and not incluir_excluidos:
+            continue
+        turmas = _turmas_da_linha(l.get("Turma"))
+        pago = chave_busca(l.get("Pago")) in ("sim", "pago", "x")
+        saida.append({
+            "id": pid,
+            "cliente": _txt(l.get("Cliente")),
+            "turma": SEP_TURMAS_TELA.join(turmas),
+            "turmas": turmas,
+            "objeto": _txt(l.get("Objeto")),
+            "protestado_em": parse_data(l.get("Protestado em")),
+            "pago": pago,
+            "pago_em": parse_data(l.get("Pago em")) if pago else None,
+            "marcado_por": _txt(l.get("Marcado por")) if pago else "",
+            "criado_por": _txt(l.get("Cadastrado por")),
+            "criado_em": parse_data(l.get("Criado em")),
+            "excluido": excluido,
+        })
+    return saida
+
+
+def ordenar_protestos(itens: list[dict]) -> list[dict]:
+    """Em aberto primeiro (o protesto mais antigo no topo); os pagos no fim (o pago mais recente antes)."""
+    abertos = sorted((p for p in itens if not p["pago"]),
+                     key=lambda p: (p["protestado_em"] or date.max, chave_busca(p["cliente"])))
+    pagos = sorted((p for p in itens if p["pago"]),
+                   key=lambda p: (p["pago_em"] or date.min, chave_busca(p["cliente"])), reverse=True)
+    return abertos + pagos
+
+
+def casa_busca_juridico(item: dict, termo: str) -> bool:
+    """Busca por nome, turma (L00345 acha L345), objeto ou advogado."""
+    t = chave_busca(termo)
+    if not t:
+        return True
+    turma = normalizar_turma(termo)
+    if turma and turma in item.get("turmas", []):
+        return True
+    texto = " ".join([item.get("cliente", ""), item.get("turma", ""), item.get("objeto", ""),
+                      item.get("advogado", "")])
+    return t in chave_busca(texto)
+
+
+def advogados_usados(judiciais: list[dict]) -> list[str]:
+    """Advogados que já aparecem nas cobranças judiciais (o mais usado primeiro), para sugerir no cadastro."""
+    contagem: dict[str, list] = {}
+    for j in judiciais:
+        if j["advogado"]:
+            contagem.setdefault(chave_busca(j["advogado"]), [j["advogado"], 0])[1] += 1
+    return [nome for nome, _ in sorted(contagem.values(), key=lambda x: (-x[1], chave_busca(x[0])))]
+
+
+def resumo_juridico(judiciais: list[dict], protestos: list[dict]) -> dict:
+    return {
+        "n_judiciais": len(judiciais),
+        "n_atrasados": sum(1 for j in judiciais if j["situacao"] == CLI_ATRASADO),
+        "n_sem_acordo": sum(1 for j in judiciais if j["situacao"] == JUD_SEM_ACORDO),
+        "cobrado": sum(j["valor"] for j in judiciais),
+        "n_protestos": len(protestos),
+        "n_protestos_abertos": sum(1 for p in protestos if not p["pago"]),
+    }

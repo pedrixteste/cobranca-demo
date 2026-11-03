@@ -2,6 +2,7 @@ import html as _html
 import json
 import os
 import re
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -41,8 +42,8 @@ def _recarregar_modulos_alterados():
 
 _recarregar_modulos_alterados()
 
-from dados import (Local, Planilha, drive_configurado, enviar_comprovante, excluir_cobranca,
-                   receber_em_duas_formas, restaurar_cobranca)
+from dados import (ABA_JUDICIAL, ABA_PROTESTOS, Local, Planilha, drive_configurado, enviar_comprovante,
+                   excluir_cobranca, receber_em_duas_formas, restaurar_cobranca)
 from demo import banco_demo
 import avisos_telegram
 import feriados
@@ -61,7 +62,12 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
                     formatar_brl, inicio_semana, mes_mais, montar_cobrancas, nome_mes,
                     normalizar_turma, ordenar_para_cobrar, parcelas_cartao, parcelas_pix,
-                    proximo_numero, resolver_valores, resumo, valor_para_float)
+                    proximo_numero, resolver_valores, resumo, valor_para_float,
+                    # Jurídico (pedido 03/11)
+                    JUD_SEM_ACORDO, NEG_A_VISTA, NEG_PARCELADO, NEG_SEM, OBJETOS, ROTULO_JUD, SITUACAO_ATIVA,
+                    SITUACAO_EXCLUIDA, acordo_para_texto, advogados_usados, casa_busca_juridico,
+                    marcar_parcela_acordo, montar_judiciais, montar_protestos, ordenar_judiciais,
+                    ordenar_protestos, parcelas_do_acordo, resumo_juridico)
 
 MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho",
          "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -94,6 +100,18 @@ SVG_PERMUTA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strok
                '<path d="M20 16H6M10 12l-4 4 4 4"/></svg>')
 SVG_SETA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" '
             'stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>')
+# Jurídico = balança; cobrança judicial = martelo; protesto = papel com selo
+SVG_BALANCA = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+               'stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v17M8 20.5h8M4 7h16"/>'
+               '<path d="M4 7l-2.5 6M4 7l2.5 6M20 7l-2.5 6M20 7l2.5 6"/>'
+               '<path d="M1.5 13a2.5 2.5 0 0 0 5 0zM17.5 13a2.5 2.5 0 0 0 5 0z"/></svg>')
+SVG_MARTELO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+               'stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 3.5l6 6-3 3-6-6z"/>'
+               '<path d="M13 8l-8.5 8.5a1.5 1.5 0 0 0 2.1 2.1L15 10"/><path d="M12.5 21h8"/></svg>')
+SVG_PROTESTO = ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+                'stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.5h8l4 4v15H6z"/>'
+                '<path d="M14 2.5v4h4"/><circle cx="12" cy="13.5" r="3"/>'
+                '<path d="M10.7 16.2l-.7 3.3 2-1 2 1-.7-3.3"/></svg>')
 
 
 ICONE_TIPO = {TIPO_PIX: ":material/qr_code_2:", TIPO_CARTAO: ":material/credit_card:"}
@@ -161,6 +179,7 @@ def _secrets_drive():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _carregar() -> dict:
+    # Erro aqui NÃO fica guardado (o Streamlit só guarda o que deu certo): a próxima tela tenta de novo
     return _banco().carregar()
 
 
@@ -169,16 +188,84 @@ def _invalidar():
     _carregar.clear()
 
 
-def _cobrancas(incluir_excluidas: bool = False):
-    """Cobranças já calculadas. None se a planilha não pôde ser lida (erro já mostrado)."""
+class PlanilhaFora(Exception):
+    """A planilha do Google não respondeu e não há uma leitura boa guardada para usar no lugar."""
+
+
+# Depois que a planilha falha, o app passa este tempo sem tentar ler de novo SOZINHO (só com o
+# "Tentar de novo"): sem isso, numa queda do Google, cada pedaço de cada tela de cada pessoa
+# esperaria o prazo inteiro da leitura, e o app ficaria lento justo quando a planilha está fora.
+ESPERA_DEPOIS_DE_FALHA = 20   # segundos
+
+
+@st.cache_resource(show_spinner=False)
+def _estado_planilha() -> dict:
+    """
+    Memória comum a todo mundo que usa o app (some quando o app reinicia):
+      "cfg"            última configuração lida COM SUCESSO
+      "config_falhou"  / "dados_falhou"   quando a leitura falhou por último (relógio do servidor)
+      "erro"           o motivo da última falha (aparece pequeno embaixo do aviso)
+    """
+    return {}
+
+
+def _falhou_ha_pouco(chave: str) -> bool:
+    quando = _estado_planilha().get(chave)
+    return quando is not None and time.monotonic() - quando < ESPERA_DEPOIS_DE_FALHA
+
+
+def _anotar_falha(chave: str, erro: Exception):
+    est = _estado_planilha()
+    est[chave] = time.monotonic()
+    est["erro"] = str(erro)
+
+
+def _aviso_planilha_fora():
+    """
+    Aviso com "Tentar de novo" quando a planilha não responde (uma vez só por tela, mesmo que
+    várias partes da tela tenham tentado ler). Antes deste aviso o app ficava parado no
+    "Carregando..." sem prazo, e quem atualizava a página caía na mesma espera (pedido 03/11).
+    """
+    if st.session_state.get("_avisou_fora"):
+        return
+    st.session_state["_avisou_fora"] = True
+    _info("<b>A planilha do Google não respondeu agora.</b> Costuma passar em poucos segundos: "
+          "toque em <b>Tentar de novo</b>.", "cx-perigo")
+    if st.button("Tentar de novo", key="btn_tentar_de_novo", icon=":material/refresh:", type="primary",
+                 use_container_width=True):
+        est = _estado_planilha()
+        est.pop("config_falhou", None)
+        est.pop("dados_falhou", None)
+        _invalidar()
+        _ler_config.clear()
+        st.rerun()
+    detalhe = _estado_planilha().get("erro", "")
+    if detalhe:
+        st.markdown(f"<div class='cx-dica'>Detalhe: {_e(detalhe[:180])}</div>", unsafe_allow_html=True)
+
+
+def _dados():
+    """As abas do app, lidas da planilha (guardadas por 1 minuto). None se não deu para ler (o aviso
+    com "Tentar de novo" já aparece)."""
     if _banco() is None:
         st.error("A planilha ainda não foi configurada nos Secrets do app.")
         return None
+    if _falhou_ha_pouco("dados_falhou"):
+        _aviso_planilha_fora()
+        return None
     try:
         with st.spinner("Carregando..."):
-            d = _carregar()
+            return _carregar()
     except Exception as e:
-        st.error(f"Não consegui ler a planilha: {e}")
+        _anotar_falha("dados_falhou", e)
+        _aviso_planilha_fora()
+        return None
+
+
+def _cobrancas(incluir_excluidas: bool = False):
+    """Cobranças já calculadas. None se a planilha não pôde ser lida (aviso já mostrado)."""
+    d = _dados()
+    if d is None:
         return None
     return montar_cobrancas(d["cobrancas"], d["parcelas"], _hoje(), incluir_excluidas)
 
@@ -188,6 +275,23 @@ def _cobranca(cid: str):
         if c["id"] == cid:
             return c
     return None
+
+
+def _juridico(incluir_excluidos: bool = False):
+    """(cobranças judiciais, protestos) já calculados. None se a planilha não pôde ser lida."""
+    d = _dados()
+    if d is None:
+        return None
+    return (montar_judiciais(d.get("judiciais", []), _hoje(), incluir_excluidos),
+            montar_protestos(d.get("protestos", []), incluir_excluidos))
+
+
+def _judicial(jid: str):
+    return next((j for j in (_juridico(True) or ([], []))[0] if j["id"] == jid), None)
+
+
+def _protesto(pid: str):
+    return next((p for p in (_juridico(True) or ([], []))[1] if p["id"] == pid), None)
 
 
 def _usuario() -> str:
@@ -215,16 +319,42 @@ TAMANHO_PADRAO = "Médio"
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _ler_config() -> dict:
+    # Erro aqui NÃO fica guardado: a próxima tela tenta ler de novo
+    return _banco().get_config()
+
+
 def _config() -> dict:
-    try:
-        return _banco().get_config() if _banco() else {}
-    except Exception:
+    """
+    Configuração do app (_Config). Até 03/11, uma leitura que falhava virava "configuração vazia" e
+    ficava GUARDADA por 10 minutos: nesse tempo o app não sabia quem era quem (sumia a entrada com
+    Gmail, o botão Configurações e a lista de nomes). Agora, se a leitura falhar, vale a última que
+    deu certo; se ainda não teve nenhuma, a tela mostra o aviso com "Tentar de novo".
+    """
+    if not _banco():
         return {}
+    est = _estado_planilha()
+    if not _falhou_ha_pouco("config_falhou"):
+        try:
+            cfg = _ler_config()
+        except Exception as e:
+            _anotar_falha("config_falhou", e)
+        else:
+            if est.get("cfg") != cfg:
+                est["cfg"] = dict(cfg)   # troca a referência inteira: quem está lendo nunca vê pela metade
+            return cfg
+    guardada = est.get("cfg")
+    if guardada is not None:
+        return dict(guardada)
+    raise PlanilhaFora(est.get("erro", ""))
 
 
 def _tamanho_atual() -> str:
     if "_tamanho" not in st.session_state:
-        salvo = _config().get("tamanho_texto")
+        try:
+            salvo = _config().get("tamanho_texto")
+        except PlanilhaFora:
+            return TAMANHO_PADRAO   # tenta de novo na próxima tela
         st.session_state["_tamanho"] = salvo if salvo in TAMANHOS else TAMANHO_PADRAO
     return st.session_state["_tamanho"]
 
@@ -239,7 +369,7 @@ def _mudar_tamanho():
         st.session_state["_tamanho"] = novo
         try:
             _banco().save_config("tamanho_texto", novo)
-            _config.clear()
+            _ler_config.clear()
         except Exception:
             pass
 
@@ -398,6 +528,11 @@ def tela_inicio():
                       "Relatório de cobranças", "Quem pagou, quem falta, quem atrasou", chips):
         _ir("relatorio")
 
+    # Jurídico (pedido 03/11): cobranças judiciais e protestos
+    if _cartao_inicio("hm_jur", "tq_jur", "Abrir jurídico", "claro", SVG_BALANCA,
+                      "Jurídico", "Cobranças judiciais e protestos", _chips_juridico()):
+        _ir("juridico")
+
     st.session_state.setdefault("_seg_tamanho", _tamanho_atual())
     st.segmented_control("Tamanho do texto", list(TAMANHOS), key="_seg_tamanho",
                          on_change=_mudar_tamanho)
@@ -436,7 +571,7 @@ def tela_inicio():
                                   icon=":material/refresh:", type="tertiary"):
         banco_demo(_hoje(), recomecar=True)
         _invalidar()
-        _config.clear()
+        _ler_config.clear()
         _flash("Exemplo recomeçado")
         st.rerun()
 
@@ -557,7 +692,7 @@ def _prender(aparelho: str, nome: str, pessoas: list):
         b.save_config(f"aparelho:{aparelho}", final)
         if chave_busca(_config().get(f"liberado:{final}", "")) == "sim":
             b.save_config(f"liberado:{final}", "")   # a liberação vale para UM aparelho
-        _config.clear()
+        _ler_config.clear()
     except Exception as e:
         st.error(f"Não consegui guardar: {e}")
         return
@@ -737,7 +872,7 @@ def _identificado() -> bool:
                   "em <b>Configurações</b> e abra o app de novo.", "cx-perigo")
             if st.button("Já liberaram, tentar de novo", key="quem_denovo", icon=":material/refresh:",
                          use_container_width=True):
-                _config.clear()
+                _ler_config.clear()
                 st.rerun()
     return False
 
@@ -748,10 +883,10 @@ def _config_varias(pares: dict) -> bool:
     try:
         for chave, valor in pares.items():
             _banco().save_config(chave, valor)
-        _config.clear()
+        _ler_config.clear()
         return True
     except Exception as e:
-        _config.clear()
+        _ler_config.clear()
         st.error(f"Não consegui salvar: {e}")
         return False
 
@@ -2341,6 +2476,8 @@ def tela_cobranca():
             for f, verbo in ((TIPO_PIX, "pago"), (TIPO_CARTAO, "passou"))) + "</div>"
     st.markdown(
         f"<div class='fc {COR_CLI[c['situacao']]}'><div class='fc-topo'>{selo}<span>{ate}</span></div>"
+        # Total da cobrança (pedido 03/11): facilita para quem vai cobrar
+        f"<div class='fc-total'><span>Total</span><b>{formatar_brl(total)}</b></div>"
         f"<div class='pg'><i style='width:{pct}%'></i></div>"
         f"<div class='fc-nums'><div><b>{formatar_brl(c['pago'])}</b><span>Pago</span></div>"
         f"<div><b>{formatar_brl(c['falta'])}</b><span>Falta</span></div>"
@@ -2655,6 +2792,651 @@ def tela_excluidas():
                 st.rerun()
 
 
+# ── Jurídico (pedido 03/11) ───────────────────────────────────────────────────
+# Tela inicial → Jurídico → Cobranças judiciais | Protestos. Cada um na sua aba da planilha
+# (_Judicial e _Protestos): nada daqui entra no relatório, na agenda nem nos avisos do Telegram.
+# Decisões do Pedro (03/11): nome "Jurídico"; acordo parcelado com UMA DATA POR PARCELA; marcar
+# parcela do acordo como paga só nessa tela; todo mundo do app vê e mexe.
+
+COR_JUD = {**COR_CLI, JUD_SEM_ACORDO: "c-neutro"}
+NEGOCIACOES = {"Ainda não": NEG_SEM, "Acordo à vista": NEG_A_VISTA, "Parcelado": NEG_PARCELADO}
+_NEG_TELA = {v: k for k, v in NEGOCIACOES.items()}
+
+
+def _plural(n: int, um: str, varios: str) -> str:
+    return f"{n} {um if n == 1 else varios}"
+
+
+def _chip(texto: str, atraso: bool = False) -> str:
+    return f"<span class='hm-chip{' atraso' if atraso else ''}'>{texto}</span>"
+
+
+def _chips_juridico() -> str:
+    """Contagem do Jurídico no cartão da tela inicial (some quando não tem nada cadastrado)."""
+    jur = _juridico()
+    if not jur:
+        return ""
+    r = resumo_juridico(*jur)
+    partes = []
+    if r["n_atrasados"]:
+        partes.append(_chip(_plural(r["n_atrasados"], "acordo atrasado", "acordos atrasados"), atraso=True))
+    if r["n_judiciais"]:
+        partes.append(_chip(f"{r['n_judiciais']} na justiça"))
+    if r["n_protestos_abertos"]:
+        partes.append(_chip(_plural(r["n_protestos_abertos"], "protesto em aberto", "protestos em aberto")))
+    return f"<div class='hm-chips'>{''.join(partes)}</div>" if partes else ""
+
+
+def tela_juridico():
+    _cabecalho("Jurídico", voltar_para="inicio", subtitulo="Clientes cobrados na justiça e títulos protestados")
+    jur = _juridico()
+    chips_jud = chips_prot = ""
+    if jur:
+        r = resumo_juridico(*jur)
+        if r["n_judiciais"]:
+            partes = [_chip(_plural(r["n_judiciais"], "cobrança", "cobranças"))]
+            if r["n_atrasados"]:
+                partes.insert(0, _chip(_plural(r["n_atrasados"], "acordo atrasado", "acordos atrasados"), True))
+            if r["n_sem_acordo"]:
+                partes.append(_chip(f"{r['n_sem_acordo']} sem acordo"))
+            chips_jud = f"<div class='hm-chips'>{''.join(partes)}</div>"
+        if r["n_protestos"]:
+            pagos = r["n_protestos"] - r["n_protestos_abertos"]
+            partes = [_chip(f"{r['n_protestos_abertos']} em aberto")]
+            if pagos:
+                partes.append(_chip(_plural(pagos, "pago", "pagos")))
+            chips_prot = f"<div class='hm-chips'>{''.join(partes)}</div>"
+    if _cartao_inicio("hm_jud", "tq_jud", "Abrir cobranças judiciais", "claro", SVG_MARTELO,
+                      "Cobranças judiciais", "Clientes na justiça e os acordos", chips_jud):
+        _ir("judicial")
+    if _cartao_inicio("hm_prot", "tq_prot", "Abrir protestos", "claro", SVG_PROTESTO,
+                      "Protestos", "Cheque, promissória ou ficha protestados", chips_prot):
+        _ir("protestos")
+
+
+def _busca(chave: str, placeholder: str) -> str:
+    return st.text_input("Buscar", key=chave, placeholder=placeholder, label_visibility="collapsed",
+                         icon=":material/search:")
+
+
+def _campos_cliente_turma(prefixo: str, erros: list):
+    """Nome do cliente e turma(s) do Jurídico. Devolve (cliente, turmas) e põe em `erros` o que falta."""
+    cliente = st.text_input("Nome do cliente", key=f"{prefixo}cliente", max_chars=80).strip()
+    turma_txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345",
+                              help="Letra do treinamento + número: L = LORAP, V = Vendas, I = Impacto, "
+                                   "P = Perfil. Mais de uma turma: separe com vírgula. Ex.: L345, V12")
+    turmas = normalizar_turmas(turma_txt)
+    if turmas:
+        _info(" &nbsp;·&nbsp; ".join(f"Turma <b>{t}</b> · {TREINAMENTOS[t[0]]}" for t in turmas))
+    elif turmas is None:
+        _erro_campo("Comece pela letra do treinamento (L, V, I ou P) e depois o número. Ex.: L345")
+        erros.append("Tem turma escrita errado (ex.: L345).")
+    else:
+        erros.append("Falta a turma (ex.: L345).")
+    if not cliente:
+        erros.insert(0, "Falta o nome do cliente.")
+    return cliente, turmas or []
+
+
+def _objeto(prefixo: str, erros: list) -> str:
+    objeto = st.pills("Objeto", OBJETOS, key=f"{prefixo}objeto")
+    if not objeto:
+        erros.append("Falta escolher o objeto: cheque, promissória ou ficha.")
+    return objeto or ""
+
+
+@st.dialog("Excluir")
+def _dlg_excluir_juridico(aba: str, rid: str, o_que: str, volta: str):
+    _info(f"Excluir {_e(o_que)}?<br>Sai da lista, mas continua guardado na planilha.", "cx-perigo")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Não, manter", key=f"_exj_{rid}_nao", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button("Sim, excluir", key=f"_exj_{rid}_sim", use_container_width=True):
+            coluna = "Excluída em" if aba == ABA_JUDICIAL else "Excluído em"
+            try:
+                ok = _banco().atualizar_registro(aba, rid, {"Situação": SITUACAO_EXCLUIDA, coluna: _hoje()})
+            except Exception as e:
+                st.error(f"Não consegui excluir: {e}")
+                return
+            if not ok:
+                st.error("Não achei esse registro na planilha. Feche e abra de novo.")
+                return
+            _invalidar()
+            _flash("Excluído")
+            st.session_state.tela = volta
+            st.rerun()
+
+
+# ── Cobranças judiciais ───────────────────────────────────────────────────────
+
+def _html_judicial(j: dict, hoje: date) -> str:
+    """Cartão compacto da lista, no mesmo jeito do relatório de cobranças."""
+    sit = j["situacao"]
+    ps = j["parcelas"]
+    if not ps:
+        partes = []
+        if j["desde"]:
+            partes.append(f"No jurídico desde <b>{data_br(j['desde'])}</b>")
+        if j["advogado"]:
+            partes.append(_e(j["advogado"]))
+        estado = " · ".join(partes)
+    elif sit == CLI_QUITADO:
+        estado = "Acordo todo pago"
+    elif sit == CLI_ATRASADO:
+        estado = (f"Acordo: <b>{formatar_brl(j['atrasado'])}</b> atrasado "
+                  f"({_plural(j['dias_atraso'], 'dia', 'dias')})")
+    else:
+        p = j["proxima"]
+        estado = (f"Acordo: próxima <b>{data_br(p['vencimento'])}</b> · {formatar_brl(p['valor'])}"
+                  if p else "Acordo fechado")
+    if len(ps) > 1 and sit != CLI_QUITADO:
+        estado += f" · {sum(1 for p in ps if p['paga'])} de {len(ps)} pagas"
+    total = j["pago"] + j["falta"]
+    pct = int(round(100 * j["pago"] / total)) if total else 0
+    local = " · ".join(x for x in (j["turma"], j["objeto"]) if x)
+    return (
+        f"<div class='cc {COR_JUD[sit]}'>"
+        f"<div class='cc-l1'><span class='cc-nome'>{_e(j['cliente'])}</span>"
+        f"<span class='sit {COR_JUD[sit]}'>{ROTULO_JUD[sit]}</span></div>"
+        f"<div class='cc-l2'><span class='cc-turma'>{_e(local)}</span>"
+        f"<span class='cc-val'>cobrado <b>{formatar_brl(j['valor'])}</b></span></div>"
+        + (f"<div class='cc-est'>{estado}</div>" if estado else "")
+        + f"<i class='cc-pg' style='width:{pct}%'></i></div>"
+    )
+
+
+def tela_judicial():
+    hoje = _hoje()
+    _cabecalho("Cobranças judiciais", voltar_para="juridico")
+    if st.button("Nova cobrança judicial", key="jd_nova", type="primary", icon=":material/add:",
+                 use_container_width=True):
+        _abrir_form_judicial(None)
+    jur = _juridico()
+    if jur is None:
+        return
+    termo = _busca("jd_busca", "Nome, turma ou advogado")
+    achados = [j for j in jur[0] if casa_busca_juridico(j, termo)]
+    if not achados:
+        msg = "Nada encontrado com essa busca." if termo.strip() else "Nenhuma cobrança judicial cadastrada ainda."
+        st.markdown(f"<div class='cx-vazio'>{msg}</div>", unsafe_allow_html=True)
+        return
+    st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'cobrança judicial', 'cobranças judiciais')} · "
+                f"{formatar_brl(sum(j['valor'] for j in achados))} cobrado</div>", unsafe_allow_html=True)
+    for j in ordenar_judiciais(achados):
+        if _cartao_toque(f"cc_j{j['id']}", f"tq_j{j['id']}", f"Abrir {j['cliente']}", _html_judicial(j, hoje)):
+            st.session_state.jud_id = j["id"]
+            _ir("jud_ficha")
+
+
+def _abrir_form_judicial(j: dict | None):
+    """Abre o cadastro (j = None) ou a edição, com os campos já preenchidos."""
+    _limpar_campos("jf_")
+    ss = st.session_state
+    ss.jud_edit = j["id"] if j else None
+    if j:
+        ss["jf_cliente"] = j["cliente"]
+        ss["jf_turma"] = SEP_TURMAS_PLANILHA.join(j["turmas"])
+        if j["objeto"] in OBJETOS:
+            ss["jf_objeto"] = j["objeto"]
+        ss["jf_valor" + MARCA_VALOR] = _num_br(j["valor"]) if j["valor"] else ""
+        if j["desde"]:
+            ss["jf_desde"] = j["desde"]
+        ss["jf_adv"] = j["advogado"]
+        ss["jf_neg"] = _NEG_TELA[j["negociacao"]]
+        ps = j["parcelas"]
+        if ps:
+            ss["jf_acordo" + MARCA_VALOR] = _num_br(j["valor_acordo"])
+        if j["negociacao"] == NEG_A_VISTA:
+            ss["jf_venc_av"] = ps[0]["vencimento"]
+        elif j["negociacao"] == NEG_PARCELADO and ps[0]["vencimento"]:
+            n, primeira = len(ps), ps[0]["vencimento"]
+            ss["jf_n"] = n
+            ss["jf_primeira"] = primeira
+            for k, p in enumerate(ps):
+                ss[f"jf_v{k}_{n}" + MARCA_VALOR] = _num_br(p["valor"])
+                if p["vencimento"]:
+                    ss[f"jf_d{k}_{n}_{primeira}"] = p["vencimento"]
+    _ir("jud_form")
+
+
+def _usar_advogado():
+    escolha = st.session_state.get("jf_adv_sug")
+    if escolha:
+        st.session_state["jf_adv"] = escolha
+    st.session_state["jf_adv_sug"] = None
+
+
+def tela_jud_form():
+    hoje = _hoje()
+    ss = st.session_state
+    jid = ss.get("jud_edit")
+    atual = _judicial(jid) if jid else None
+    if jid and (not atual or atual["excluida"]):
+        _cabecalho("Cobrança judicial", voltar_para="judicial")
+        st.info("Essa cobrança judicial não está mais disponível.")
+        return
+    _cabecalho("Editar cobrança judicial" if atual else "Nova cobrança judicial",
+               voltar_para="jud_ficha" if atual else "judicial")
+    erros = []
+    with st.container(key="sec_jf1"):
+        _titulo_secao(1, "Cliente")
+        cliente, turmas = _campos_cliente_turma("jf_", erros)
+
+    with st.container(key="sec_jf2"):
+        _titulo_secao(2, "Cobrança na justiça")
+        objeto = _objeto("jf_", erros)
+        valor, ok_v = _valor("Valor que está sendo cobrado", "jf_valor")
+        if not ok_v:
+            erros.append("Tem valor digitado errado.")
+        elif not valor:
+            erros.append("Falta o valor que está sendo cobrado.")
+        ss.setdefault("jf_desde", hoje)
+        desde = st.date_input("Em cobrança no jurídico desde", format="DD/MM/YYYY", key="jf_desde")
+        if not desde:
+            erros.append("Falta a data em que foi para o jurídico.")
+        advogado = " ".join(st.text_input("Advogado responsável", key="jf_adv", max_chars=60).split())
+        if not advogado:
+            usados = advogados_usados((_juridico() or ([], []))[0])
+            if usados:
+                st.pills("Já usados", usados[:6], key="jf_adv_sug", on_change=_usar_advogado)
+
+    valor_acordo, valores, datas, conf_ok = None, [], [], True
+    with st.container(key="sec_jf3"):
+        _titulo_secao(3, "Negociação")
+        st.markdown("<div class='cx-dica' style='margin:0 0 .3rem'>Pode preencher agora ou depois, "
+                    "em <b>Editar</b>.</div>", unsafe_allow_html=True)
+        neg = NEGOCIACOES[st.radio("Negociação", list(NEGOCIACOES), key="jf_neg", label_visibility="collapsed",
+                                   captions=["sem acordo por enquanto", "paga tudo de uma vez",
+                                             "dividido em parcelas"])]
+        # Na edição, a parcela que já estava paga continua paga (se o tipo de acordo não mudou)
+        anteriores = atual["parcelas"] if atual and atual["negociacao"] == neg else []
+        if neg != NEG_SEM:
+            acordo, ok_a = _valor("Valor do acordo", "jf_acordo", placeholder=_num_br(valor) if valor else "0,00",
+                                  help="Em branco = o mesmo valor que está sendo cobrado.")
+            if not ok_a:
+                erros.append("Tem valor digitado errado.")
+            valor_acordo = acordo if acordo is not None else valor
+            if not valor_acordo:
+                erros.append("Falta o valor do acordo.")
+        if neg == NEG_A_VISTA:
+            venc = st.date_input("Vencimento", value=None, format="DD/MM/YYYY", key="jf_venc_av")
+            if not venc:
+                erros.append("Falta o vencimento do acordo.")
+            valores, datas = [valor_acordo or 0.0], [venc]
+            if anteriores and anteriores[0]["paga"]:
+                _info(f"Este acordo já está <b>pago</b> ({data_br(anteriores[0]['pago_em'])}).", "cx-ok")
+        elif neg == NEG_PARCELADO:
+            n = st.number_input("Em quantas parcelas?", min_value=2, value=None, step=1, key="jf_n",
+                                placeholder="Ex.: 5")
+            primeira = st.date_input("1º vencimento", value=None, format="DD/MM/YYYY", key="jf_primeira",
+                                     help="As outras vêm todo mês no mesmo dia. Dá para mudar cada uma embaixo.")
+            if not n:
+                erros.append("Falta dizer em quantas parcelas.")
+            elif not primeira:
+                erros.append("Falta o 1º vencimento.")
+            else:
+                n = int(n)
+                base = datas_continuas(primeira, n)
+                st.markdown("<div class='px-lista'>Parcela por parcela</div>", unsafe_allow_html=True)
+                # Cada parcela já vem com a sua parte; a que for mudada fica e as outras dividem o resto
+                _valores_automaticos([f"jf_v{k}_{n}" for k in range(n)], valor_acordo or 0.0)
+                digitados = []
+                for k in range(n):
+                    with st.container(key=f"jf_linha_{k}"):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            v, ok = _valor(f"Valor da {k + 1}ª", f"jf_v{k}_{n}", placeholder="em branco = divide")
+                            if not ok:
+                                erros.append("Tem valor digitado errado.")
+                            digitados.append(v)
+                        with c2:
+                            # A chave leva o 1º vencimento: trocar ele recalcula as datas sugeridas
+                            chave_d = f"jf_d{k}_{n}_{primeira}"
+                            ss.setdefault(chave_d, base[k])
+                            datas.append(st.date_input(f"Vencimento da {k + 1}ª", format="DD/MM/YYYY",
+                                                       key=chave_d))
+                        if k < len(anteriores) and anteriores[k]["paga"]:
+                            st.markdown(f"<div class='cx-dica'>Já paga em <b>{data_br(anteriores[k]['pago_em'])}"
+                                        "</b></div>", unsafe_allow_html=True)
+                valores = resolver_valores(valor_acordo or 0.0, digitados)
+                if any(d is None for d in datas):
+                    erros.append("Falta alguma data de vencimento.")
+                if any(v <= 0 for v in valores):
+                    erros.append("Tem parcela com valor zero ou negativo.")
+                if valor_acordo:
+                    conf_ok = _bloco_conferencia(valor_acordo, valores, "jf_")
+                somem = sum(1 for p in anteriores[n:] if p["paga"])
+                if somem:
+                    _info(f"Atenção: {_plural(somem, 'parcela já paga sai', 'parcelas já pagas saem')} do "
+                          "acordo com esse número de parcelas.", "cx-perigo")
+        if atual and neg != atual["negociacao"] and any(p["paga"] for p in atual["parcelas"]):
+            _info("Atenção: trocar o tipo de acordo apaga as marcas de pago do acordo de antes.", "cx-perigo")
+
+    rotulo = "Salvar alterações" if atual else "Salvar cobrança judicial"
+    if st.button(rotulo, type="primary", key="jf_salvar", use_container_width=True, icon=":material/check:"):
+        if not conf_ok:
+            erros.append("As parcelas não fecham com o valor do acordo: confira ou marque a caixa acima.")
+        if erros:
+            st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
+        else:
+            # Tudo que se digita vai em MAIÚSCULA (pedido 16/10)
+            _salvar_judicial(atual, {
+                "Cliente": cliente.upper(), "Turma": SEP_TURMAS_PLANILHA.join(turmas), "Objeto": objeto,
+                "Valor cobrado": valor, "No jurídico desde": desde, "Advogado": advogado.upper(),
+                "Negociação": neg, "Valor do acordo": valor_acordo if neg else "",
+            }, neg, valores, datas)
+
+
+def _salvar_judicial(atual: dict | None, campos: dict, neg: str, valores: list, datas: list):
+    if st.session_state.get("_salvando"):
+        return
+    st.session_state["_salvando"] = True
+    try:
+        anteriores = []
+        if atual:
+            # Relê na hora de gravar: se alguém marcou uma parcela como paga com este formulário
+            # aberto, a marca não se perde
+            _invalidar()
+            fresco = _judicial(atual["id"]) or atual
+            anteriores = fresco["parcelas"] if fresco["negociacao"] == neg else []
+        campos["Acordo"] = acordo_para_texto(parcelas_do_acordo(valores, datas, anteriores)) if neg else ""
+        if atual:
+            jid = atual["id"]
+            if not _banco().atualizar_registro(ABA_JUDICIAL, jid, campos):
+                st.error("Não achei essa cobrança judicial na planilha. Volte e abra de novo.")
+                return
+        else:
+            jid = _banco().criar_registro(ABA_JUDICIAL, {**campos, "Cadastrada por": _usuario(),
+                                                         "Criada em": _hoje(), "Situação": SITUACAO_ATIVA})
+    except Exception as e:
+        st.error(f"Não consegui salvar: {e}")
+        return
+    finally:
+        st.session_state["_salvando"] = False
+    _invalidar()
+    _limpar_campos("jf_")
+    st.session_state.jud_id = jid
+    st.session_state.jud_edit = None
+    _flash(f"Cobrança judicial de {campos['Cliente']} salva")
+    _ir("jud_ficha")
+
+
+def _html_parcela_acordo(p: dict, hoje: date) -> str:
+    """Parcela do acordo como folha de carnê, igual às das cobranças (carimbo PAGO quando paga)."""
+    d = p["vencimento"]
+    cor = COR_PARC[p["situacao"]]
+    if p["paga"]:
+        pago_em = f"<small>{p['pago_em'].strftime('%d/%m/%y')}</small>" if p["pago_em"] else ""
+        carimbo, sit = f"<div class='pc-carimbo'>PAGO{pago_em}</div>", ""
+    else:
+        carimbo = ""
+        if p["situacao"] == SIT_ATRASADA:
+            txt = f"{_plural((hoje - d).days, 'dia', 'dias')} de atraso"
+        elif p["situacao"] == SIT_EM_BREVE:
+            txt = "Vence hoje" if d == hoje else "Amanhã" if d == hoje + timedelta(days=1) else "Em breve"
+        else:
+            txt = "Em aberto"
+        sit = f"<span class='sit {cor}'>{txt}</span>"
+    quem = f"<br><span class='pc-quem'>{_e(p['marcado_por'])} marcou</span>" if p["paga"] and p["marcado_por"] else ""
+    return (f"<div class='pc {cor}{' pago' if p['paga'] else ''}'>{_bloco_data(d)}<div class='pc-corpo'>"
+            f"<div class='pc-topo'><span class='pc-tag'></span>{sit}</div>"
+            f"<div class='pc-rot'>{_e(p['rotulo'])}{quem}</div>"
+            f"<div class='pc-valor'>{formatar_brl(p['valor'])}</div></div>{carimbo}</div>")
+
+
+def _parcela_acordo_ui(j: dict, p: dict, hoje: date):
+    chave = f"{j['id']}_{p['n']}"
+    with st.container(key=f"pc_jd_{chave}"):
+        st.markdown(_html_parcela_acordo(p, hoje), unsafe_allow_html=True)
+        if p["paga"]:
+            if st.button("Desfazer pagamento", key=f"jdp_des_{chave}", icon=":material/undo:",
+                         use_container_width=True):
+                _dlg_acordo_desfazer(j["id"], p["n"])
+        elif st.button("Marcar como paga", key=f"jdp_pg_{chave}", icon=":material/check_circle:",
+                       use_container_width=True):
+            _dlg_acordo_pagar(j["id"], p["n"])
+
+
+def _parcela_do_acordo(jid: str, n: int):
+    j = _judicial(jid)
+    if not j or not 1 <= n <= len(j["parcelas"]):
+        return j, None
+    return j, j["parcelas"][n - 1]
+
+
+def _gravar_acordo(jid: str, n: int, paga: bool, quando: date | None = None) -> bool:
+    """Marca ou desmarca UMA parcela do acordo. Relê a planilha na hora: se outra pessoa mexeu
+    em outra parcela do mesmo acordo há pouco, a marca dela não se perde."""
+    _invalidar()
+    j, p = _parcela_do_acordo(jid, n)
+    if not p:
+        st.error("Não achei essa parcela. Feche e abra a ficha de novo.")
+        return False
+    novas = marcar_parcela_acordo(j["parcelas"], n, paga, quando, _usuario())
+    try:
+        ok = _banco().atualizar_registro(ABA_JUDICIAL, jid, {"Acordo": acordo_para_texto(novas)})
+    except Exception as e:
+        st.error(f"Não consegui salvar: {e}")
+        return False
+    if not ok:
+        st.error("Não achei essa cobrança judicial na planilha.")
+        return False
+    _invalidar()
+    return True
+
+
+@st.dialog("Marcar como paga")
+def _dlg_acordo_pagar(jid: str, n: int):
+    j, p = _parcela_do_acordo(jid, n)
+    if not p:
+        return
+    st.markdown(f"<div class='dl-cab'><b>{_e(j['cliente'])}</b><span>{_e(p['rotulo'])} · "
+                f"{formatar_brl(p['valor'])}</span></div>", unsafe_allow_html=True)
+    quando = st.date_input("Pago em", value=_hoje(), format="DD/MM/YYYY", key=f"_jdp_{jid}_{n}_data")
+    if st.button("Confirmar pagamento", type="primary", key=f"_jdp_{jid}_{n}_ok", use_container_width=True,
+                 icon=":material/check:"):
+        if not quando:
+            _erro_campo("Escolha a data do pagamento.")
+        elif _gravar_acordo(jid, n, True, quando):
+            _flash("Pagamento marcado")
+            st.rerun()
+
+
+@st.dialog("Desfazer pagamento")
+def _dlg_acordo_desfazer(jid: str, n: int):
+    j, p = _parcela_do_acordo(jid, n)
+    if not p:
+        return
+    _info(f"Tirar a marca de pago de <b>{_e(p['rotulo'])}</b> ({formatar_brl(p['valor'])}) de "
+          f"<b>{_e(j['cliente'])}</b>? Ela volta a ficar em aberto.", "cx-perigo")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Não, manter", key=f"_jdd_{jid}_{n}_nao", use_container_width=True):
+            st.rerun()
+    with c2:
+        if st.button("Sim, desfazer", key=f"_jdd_{jid}_{n}_sim", use_container_width=True):
+            if _gravar_acordo(jid, n, False):
+                _flash("Pagamento desfeito")
+                st.rerun()
+
+
+def tela_jud_ficha():
+    hoje = _hoje()
+    j = _judicial(st.session_state.get("jud_id", ""))
+    if not j or j["excluida"]:
+        _cabecalho("Cobrança judicial", voltar_para="judicial")
+        st.info("Essa cobrança judicial não está mais disponível.")
+        return
+    sub = " · ".join(x for x in (f"Turma {_e(j['turma'])}" if j["turma"] else "", _e(j["objeto"])) if x)
+    _cabecalho(j["cliente"], voltar_para="judicial", subtitulo=sub)
+    sit = j["situacao"]
+    selo = f"<span class='sit {COR_JUD[sit]}'>{ROTULO_JUD[sit]}</span>"
+    desde = f"No jurídico desde <b>{data_br(j['desde'])}</b>" if j["desde"] else ""
+    adv = f"Advogado: <b>{_e(j['advogado'])}</b>" if j["advogado"] else "Advogado: não informado"
+    ps = j["parcelas"]
+    acordo = ""
+    if ps:
+        total = j["pago"] + j["falta"]
+        pct = int(round(100 * j["pago"] / total)) if total else 0
+        titulo = (f"Acordo à vista de <b>{formatar_brl(total)}</b>" if j["negociacao"] == NEG_A_VISTA
+                  else f"Acordo em <b>{len(ps)} parcelas</b>, somando <b>{formatar_brl(total)}</b>")
+        acordo = (f"<div class='fc-acordo'>{titulo}</div><div class='pg'><i style='width:{pct}%'></i></div>"
+                  f"<div class='fc-nums'><div><b>{formatar_brl(j['pago'])}</b><span>Pago</span></div>"
+                  f"<div><b>{formatar_brl(j['falta'])}</b><span>Falta</span></div>"
+                  f"<div class='{'atr' if j['atrasado'] else ''}'><b>{formatar_brl(j['atrasado'])}</b>"
+                  f"<span>Atrasado</span></div></div>")
+    quem = ""
+    if j["criada_por"] or j["criada_em"]:
+        por = f" por <b>{_e(j['criada_por'])}</b>" if j["criada_por"] else ""
+        em = f" em {data_br(j['criada_em'])}" if j["criada_em"] else ""
+        quem = f"<div class='fc-quem'>Cadastrada{por}{em}</div>"
+    st.markdown(
+        f"<div class='fc {COR_JUD[sit]}'><div class='fc-topo'>{selo}<span>{desde}</span></div>"
+        f"<div class='fc-total'><span>Valor cobrado</span><b>{formatar_brl(j['valor'])}</b></div>"
+        f"<div class='fc-linha'>{adv}</div>{acordo}{quem}</div>",
+        unsafe_allow_html=True,
+    )
+    if not ps:
+        _info("Ainda sem acordo. Quando fechar, toque em <b>Editar</b> e preencha a negociação.", "cx-nota")
+    else:
+        st.markdown("<div class='fc-grupo'>Acordo</div>", unsafe_allow_html=True)
+        for p in ps:
+            _parcela_acordo_ui(j, p, hoje)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Editar", key="jd_editar", icon=":material/edit:", use_container_width=True):
+            _abrir_form_judicial(j)
+    with c2:
+        if st.button("Excluir", key="jd_excluir", icon=":material/delete:", use_container_width=True):
+            _dlg_excluir_juridico(ABA_JUDICIAL, j["id"], f"a cobrança judicial de {j['cliente']}", "judicial")
+
+
+# ── Protestos ─────────────────────────────────────────────────────────────────
+
+def _html_protesto(p: dict) -> str:
+    cor = "c-ok" if p["pago"] else "c-neutro"
+    chip = "<span class='sit c-ok'>Pago</span>" if p["pago"] else "<span class='sit c-neutro'>Em aberto</span>"
+    local = " · ".join(x for x in (p["turma"], p["objeto"]) if x)
+    quando = f"protestado <b>{data_br(p['protestado_em'])}</b>" if p["protestado_em"] else ""
+    estado = ""
+    if p["pago"]:
+        por = f" · {_e(p['marcado_por'])} marcou" if p["marcado_por"] else ""
+        em = f" em <b>{data_br(p['pago_em'])}</b>" if p["pago_em"] else ""
+        estado = f"<div class='cc-est'>Pago{em}{por}</div>"
+    return (f"<div class='cc {cor}'><div class='cc-l1'><span class='cc-nome'>{_e(p['cliente'])}</span>{chip}</div>"
+            f"<div class='cc-l2'><span class='cc-turma'>{_e(local)}</span>"
+            f"<span class='cc-val'>{quando}</span></div>{estado}</div>")
+
+
+def tela_protestos():
+    _cabecalho("Protestos", voltar_para="juridico")
+    if st.button("Novo protesto", key="pt_novo", type="primary", icon=":material/add:", use_container_width=True):
+        _abrir_form_protesto(None)
+    jur = _juridico()
+    if jur is None:
+        return
+    termo = _busca("pt_busca", "Nome, turma ou objeto")
+    achados = [p for p in jur[1] if casa_busca_juridico(p, termo)]
+    if not achados:
+        msg = "Nada encontrado com essa busca." if termo.strip() else "Nenhum protesto cadastrado ainda."
+        st.markdown(f"<div class='cx-vazio'>{msg}</div>", unsafe_allow_html=True)
+        return
+    abertos = sum(1 for p in achados if not p["pago"])
+    st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'protesto', 'protestos')} · {abertos} em aberto</div>",
+                unsafe_allow_html=True)
+    for p in ordenar_protestos(achados):
+        if _cartao_toque(f"cc_p{p['id']}", f"tq_p{p['id']}", f"Abrir {p['cliente']}", _html_protesto(p)):
+            _abrir_form_protesto(p)
+
+
+def _abrir_form_protesto(p: dict | None):
+    _limpar_campos("pf_")
+    ss = st.session_state
+    ss.prot_edit = p["id"] if p else None
+    if p:
+        ss["pf_cliente"] = p["cliente"]
+        ss["pf_turma"] = SEP_TURMAS_PLANILHA.join(p["turmas"])
+        if p["objeto"] in OBJETOS:
+            ss["pf_objeto"] = p["objeto"]
+        if p["protestado_em"]:
+            ss["pf_data"] = p["protestado_em"]
+        ss["pf_pago"] = p["pago"]
+        if p["pago_em"]:
+            ss["pf_pago_em"] = p["pago_em"]
+    _ir("prot_form")
+
+
+def tela_prot_form():
+    hoje = _hoje()
+    ss = st.session_state
+    pid = ss.get("prot_edit")
+    atual = _protesto(pid) if pid else None
+    if pid and (not atual or atual["excluido"]):
+        _cabecalho("Protesto", voltar_para="protestos")
+        st.info("Esse protesto não está mais disponível.")
+        return
+    _cabecalho("Protesto" if atual else "Novo protesto", voltar_para="protestos")
+    erros = []
+    with st.container(key="sec_pf1"):
+        cliente, turmas = _campos_cliente_turma("pf_", erros)
+        objeto = _objeto("pf_", erros)
+        ss.setdefault("pf_data", hoje)
+        data = st.date_input("Data de inclusão do protesto", format="DD/MM/YYYY", key="pf_data")
+        if not data:
+            erros.append("Falta a data de inclusão do protesto.")
+        pago = st.checkbox("Já foi pago", key="pf_pago")
+        pago_em = None
+        if pago:
+            ss.setdefault("pf_pago_em", hoje)
+            pago_em = st.date_input("Pago em", format="DD/MM/YYYY", key="pf_pago_em")
+            if not pago_em:
+                erros.append("Falta a data do pagamento.")
+
+    if atual and (atual["criado_por"] or atual["criado_em"]):
+        por = f" por <b>{_e(atual['criado_por'])}</b>" if atual["criado_por"] else ""
+        em = f" em {data_br(atual['criado_em'])}" if atual["criado_em"] else ""
+        st.markdown(f"<div class='cf-meta'>Cadastrado{por}{em}</div>", unsafe_allow_html=True)
+    rotulo = "Salvar alterações" if atual else "Salvar protesto"
+    if st.button(rotulo, type="primary", key="pf_salvar", use_container_width=True, icon=":material/check:"):
+        if erros:
+            st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
+        else:
+            ja_marcado = atual["marcado_por"] if atual and atual["pago"] else ""
+            _salvar_protesto(atual, {
+                "Cliente": cliente.upper(), "Turma": SEP_TURMAS_PLANILHA.join(turmas), "Objeto": objeto,
+                "Protestado em": data, "Pago": pago, "Pago em": pago_em if pago else "",
+                "Marcado por": (ja_marcado or _usuario()) if pago else "",
+            })
+    if atual and st.button("Excluir protesto", key="pt_excluir", icon=":material/delete:", use_container_width=True):
+        _dlg_excluir_juridico(ABA_PROTESTOS, atual["id"], f"o protesto de {atual['cliente']}", "protestos")
+
+
+def _salvar_protesto(atual: dict | None, campos: dict):
+    if st.session_state.get("_salvando"):
+        return
+    st.session_state["_salvando"] = True
+    try:
+        if atual:
+            if not _banco().atualizar_registro(ABA_PROTESTOS, atual["id"], campos):
+                st.error("Não achei esse protesto na planilha. Volte e abra de novo.")
+                return
+        else:
+            _banco().criar_registro(ABA_PROTESTOS, {**campos, "Cadastrado por": _usuario(), "Criado em": _hoje(),
+                                                    "Situação": SITUACAO_ATIVA})
+    except Exception as e:
+        st.error(f"Não consegui salvar: {e}")
+        return
+    finally:
+        st.session_state["_salvando"] = False
+    _invalidar()
+    _limpar_campos("pf_")
+    st.session_state.prot_edit = None
+    _flash(f"Protesto de {campos['Cliente']} salvo")
+    _ir("protestos")
+
+
 # ── Notificações ──────────────────────────────────────────────────────────────
 
 def _token_bot() -> str:
@@ -2669,7 +3451,7 @@ def _usuario_do_bot(_token: str) -> str:
 def _salvar_config(chave: str, valor: str) -> bool:
     try:
         _banco().save_config(chave, valor)
-        _config.clear()
+        _ler_config.clear()
         return True
     except Exception as e:
         st.error(f"Não consegui salvar: {e}")
@@ -2807,7 +3589,9 @@ def tela_feriados():
 _TELA_PAI = {"nova": "inicio", "pix": "nova", "cartao": "nova", "hibrido": "nova", "permuta": "nova",
              "relatorio": "inicio",
              "excluidas": "inicio", "notificacoes": "inicio", "feriados": "inicio", "config": "inicio",
-             "cobranca": None}
+             "cobranca": None,
+             "juridico": "inicio", "judicial": "juridico", "protestos": "juridico",
+             "jud_ficha": "judicial", "jud_form": "judicial", "prot_form": "protestos"}
 
 
 def _voltar_do_celular():
@@ -2820,6 +3604,8 @@ def _voltar_do_celular():
     if tela not in _TELA_PAI:
         return
     pai = _TELA_PAI[tela] or st.session_state.get("cob_volta", "relatorio")
+    if tela == "jud_form" and st.session_state.get("jud_edit"):
+        pai = "jud_ficha"   # editando: volta para a ficha que estava aberta
     st.markdown("<style>.st-key-_btn_voltar_hw{display:none}</style>", unsafe_allow_html=True)
     if st.button("voltar", key="_btn_voltar_hw"):
         st.session_state.tela = pai
@@ -3002,11 +3788,24 @@ telas = {
     "notificacoes": tela_notificacoes,
     "config": tela_config,
     "feriados": tela_feriados,
+    "juridico": tela_juridico,
+    "judicial": tela_judicial,
+    "jud_form": tela_jud_form,
+    "jud_ficha": tela_jud_ficha,
+    "protestos": tela_protestos,
+    "prot_form": tela_prot_form,
 }
 if st.session_state.tela not in telas:
     st.session_state.tela = "inicio"
-if _identificado():
-    telas[st.session_state.tela]()
-    _voltar_do_celular()
-    _campos_do_celular()
-    _renovar_cookie_do_aparelho()
+st.session_state["_avisou_fora"] = False   # o aviso "a planilha não respondeu" aparece uma vez por tela
+try:
+    if _identificado():
+        telas[st.session_state.tela]()
+        _voltar_do_celular()
+        _campos_do_celular()
+        _renovar_cookie_do_aparelho()
+except PlanilhaFora:
+    # A planilha não respondeu e ainda não há uma leitura boa guardada: em vez de uma tela errada
+    # (ex.: "Quem está usando?" sem ninguém na lista), o aviso com "Tentar de novo"
+    st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Cobranças</div>", unsafe_allow_html=True)
+    _aviso_planilha_fora()

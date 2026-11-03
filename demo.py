@@ -7,8 +7,9 @@ import os
 import tempfile
 from datetime import date, timedelta
 
-from dados import Local
-from nucleo import datas_continuas, parcelas_cartao, parcelas_hibrido, parcelas_permuta, parcelas_pix
+from dados import ABA_JUDICIAL, ABA_PROTESTOS, Local
+from nucleo import (NEG_PARCELADO, acordo_para_texto, datas_continuas, marcar_parcela_acordo, parcelas_cartao,
+                    parcelas_do_acordo, parcelas_hibrido, parcelas_permuta, parcelas_pix)
 
 ARQUIVO_DEMO = os.path.join(tempfile.gettempdir(), "cobrancas_demo.local.json")
 
@@ -48,6 +49,28 @@ def semear(banco, hoje: date):
                          parcelas_permuta([("CESTAS DE CAFÉ DA MANHÃ", d(-40), 800.0),
                                            ("BOLOS PARA O EVENTO", d(-12), 1200.0)],
                                           creditos=[(d(-70), 3000.0), (d(-10), 2500.0)]))
+
+    # Jurídico (pedido 03/11): uma cobrança judicial com acordo parcelado (2 pagas, a 3ª atrasada),
+    # outra ainda sem acordo; um protesto em aberto e um já pago
+    acordo = parcelas_do_acordo([600.0] * 6, datas_continuas(d(-65), 6))
+    acordo = marcar_parcela_acordo(acordo, 1, True, d(-66), "Ana")
+    acordo = marcar_parcela_acordo(acordo, 2, True, d(-35), "Ana")
+    banco.criar_registro(ABA_JUDICIAL, {
+        "Cliente": "LOJA PONTO CERTO (EXEMPLO)", "Turma": "L340", "Objeto": "Cheque", "Valor cobrado": 4800.0,
+        "No jurídico desde": d(-95), "Advogado": "DRA. ADVOGADA (EXEMPLO)", "Negociação": NEG_PARCELADO,
+        "Valor do acordo": 3600.0, "Acordo": acordo_para_texto(acordo),
+        "Cadastrada por": "Pedro", "Criada em": d(-95), "Situação": "Ativa"})
+    banco.criar_registro(ABA_JUDICIAL, {
+        "Cliente": "MARCOS VIEIRA (EXEMPLO)", "Turma": "V10", "Objeto": "Promissória", "Valor cobrado": 2500.0,
+        "No jurídico desde": d(-20), "Advogado": "DRA. ADVOGADA (EXEMPLO)",
+        "Cadastrada por": "Pedro", "Criada em": d(-20), "Situação": "Ativa"})
+    banco.criar_registro(ABA_PROTESTOS, {
+        "Cliente": "AUTO PEÇAS SUL (EXEMPLO)", "Turma": "I5", "Objeto": "Ficha", "Protestado em": d(-45),
+        "Cadastrado por": "Ana", "Criado em": d(-45), "Situação": "Ativa"})
+    banco.criar_registro(ABA_PROTESTOS, {
+        "Cliente": "JOÃO RIBEIRO (EXEMPLO)", "Turma": "L338", "Objeto": "Cheque", "Protestado em": d(-120),
+        "Pago": True, "Pago em": d(-30), "Marcado por": "Ana",
+        "Cadastrado por": "Ana", "Criado em": d(-120), "Situação": "Ativa"})
 
 
 def banco_demo(hoje: date, recomecar: bool = False) -> Local:

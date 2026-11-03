@@ -14,16 +14,33 @@ import io
 import json
 import os
 import re
+import time
 import uuid
 from datetime import date
 
-from nucleo import (COBRANCAS_HEADERS, PARCELAS_HEADERS, SITUACAO_ATIVA, SITUACAO_EXCLUIDA,
-                    data_br, linhas_de_valores, valor_planilha)
+from nucleo import (COBRANCAS_HEADERS, JUDICIAL_HEADERS, PARCELAS_HEADERS, PROTESTOS_HEADERS,
+                    SITUACAO_ATIVA, SITUACAO_EXCLUIDA, data_br, linhas_de_valores, valor_planilha)
 
 ABA_COBRANCAS = "_Cobrancas"
 ABA_PARCELAS  = "_Parcelas"
 ABA_CONFIG    = "_Config"
+ABA_JUDICIAL  = "_Judicial"    # Jurídico (pedido 03/11): cobranças judiciais
+ABA_PROTESTOS = "_Protestos"   # Jurídico (pedido 03/11): protestos
 CONFIG_HEADERS = ["Chave", "Valor"]
+
+# Abas de "uma linha por registro, achado pelo ID" (gravadas por criar_registro/atualizar_registro)
+HEADERS_DA_ABA = {ABA_JUDICIAL: JUDICIAL_HEADERS, ABA_PROTESTOS: PROTESTOS_HEADERS}
+# O que o app lê de uma vez (a _Config tem leitura própria, guardada por mais tempo)
+_ABAS_DO_APP = (ABA_COBRANCAS, ABA_PARCELAS, ABA_JUDICIAL, ABA_PROTESTOS)
+_CHAVE_DA_ABA = {ABA_COBRANCAS: "cobrancas", ABA_PARCELAS: "parcelas",
+                 ABA_JUDICIAL: "judiciais", ABA_PROTESTOS: "protestos"}
+
+# Pedido do Google com prazo (antes não tinha: uma resposta que não vinha deixava o app parado,
+# e todo mundo que abria ficava esperando junto). (conectar, receber) em segundos.
+TEMPO_LIMITE = (5, 12)
+# Leitura que falhou por motivo passageiro tenta de novo depois destas esperas (segundos)
+ESPERAS_LEITURA = (1.0, 2.5)
+_CODIGOS_PASSAGEIROS = (408, 429, 500, 502, 503, 504)
 
 # Só planilhas: a conta de serviço não precisa do Drive (quem sobe comprovante
 # é a conta do dono, via OAuth drive.file).
@@ -66,12 +83,59 @@ def novo_id() -> str:
 
 # ── Planilha Google ───────────────────────────────────────────────────────────
 
+def _cliente_paciente():
+    """
+    Cliente HTTP do gspread que, na LEITURA, tenta de novo quando o Google falha por motivo
+    passageiro (limite de uso, servidor ocupado, tempo esgotado, conexão caiu). Gravação NÃO
+    tenta de novo: se o Google gravou e só a resposta se perdeu, repetir duplicaria a linha.
+    """
+    import requests
+    from gspread.exceptions import APIError
+    from gspread.http_client import HTTPClient
+
+    class ClientePaciente(HTTPClient):
+        def request(self, method, endpoint, *args, **kwargs):
+            if str(method).lower() != "get":
+                return super().request(method, endpoint, *args, **kwargs)
+            for espera in (*ESPERAS_LEITURA, None):
+                try:
+                    return super().request(method, endpoint, *args, **kwargs)
+                except APIError as e:
+                    codigo = getattr(getattr(e, "response", None), "status_code", 0)
+                    if espera is None or codigo not in _CODIGOS_PASSAGEIROS:
+                        raise
+                except requests.RequestException:
+                    if espera is None:
+                        raise
+                time.sleep(espera)
+
+    return ClientePaciente
+
+
+def _codigo_erro(e) -> int:
+    return getattr(getattr(e, "response", None), "status_code", 0) or 0
+
+
 class Planilha:
     def __init__(self, spreadsheet_id: str, credenciais: dict):
         import gspread
-        self._gc = gspread.service_account_from_dict(credenciais, scopes=SCOPES)
+        self._gc = gspread.service_account_from_dict(credenciais, scopes=SCOPES,
+                                                     http_client=_cliente_paciente())
+        self._gc.set_timeout(TEMPO_LIMITE)
         self._id = spreadsheet_id
         self._sh = None
+        # Nomes das abas que existem, lidos UMA vez (ler isso custa ~1 s a cada vez).
+        # Atualizado quando o app cria uma aba; conferido de novo se uma leitura reclamar de aba.
+        self._existentes: set | None = None
+        self._conferido_em = 0.0
+
+    def _abas_existentes(self) -> set:
+        # Falta aba do app e já faz 5 min que conferiu: confere de novo (alguém pode ter criado)
+        faltando = self._existentes is not None and not set(_ABAS_DO_APP) <= self._existentes
+        if self._existentes is None or (faltando and time.monotonic() - self._conferido_em > 300):
+            self._existentes = {ws.title for ws in self._planilha().worksheets()}
+            self._conferido_em = time.monotonic()
+        return self._existentes
 
     def _planilha(self):
         if self._sh is None:
@@ -86,6 +150,8 @@ class Planilha:
             ws = sh.worksheet(nome)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=nome, rows=1000, cols=len(headers))
+            if self._existentes is not None:
+                self._existentes.add(nome)
             ws.update(range_name="A1", values=[headers], value_input_option="RAW")
             ws.format(f"A1:{_letra(len(headers))}1", {
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
@@ -104,24 +170,36 @@ class Planilha:
 
     # Leitura -----------------------------------------------------------------
 
-    def carregar(self) -> dict:
-        sh = self._planilha()
-        existentes = {ws.title for ws in sh.worksheets()}
+    def carregar(self, _de_novo: bool = False) -> dict:
+        """
+        Todas as abas do app num pedido só, direto nos valores (sem reler a lista de abas a cada
+        vez: era isso que deixava a abertura lenta). Aba que ainda não existe volta vazia; as
+        abas das cobranças são criadas se faltarem, como sempre.
+        """
+        from gspread.exceptions import APIError
+        existentes = self._abas_existentes()
         for nome, headers in ((ABA_COBRANCAS, COBRANCAS_HEADERS), (ABA_PARCELAS, PARCELAS_HEADERS)):
             if nome not in existentes:
                 self._aba(nome, headers)
-        blocos = sh.values_batch_get([f"'{ABA_COBRANCAS}'", f"'{ABA_PARCELAS}'"]).get("valueRanges", [])
-        return {
-            "cobrancas": linhas_de_valores(blocos[0].get("values", [])) if blocos else [],
-            "parcelas": linhas_de_valores(blocos[1].get("values", [])) if len(blocos) > 1 else [],
-        }
+        nomes = [n for n in _ABAS_DO_APP if n in existentes]
+        try:
+            resposta = self._gc.http_client.values_batch_get(self._id, [f"'{n}'" for n in nomes])
+        except APIError as e:
+            # 400 = alguma aba sumiu ou mudou de nome desde a última conferência: confere e tenta 1 vez
+            if _codigo_erro(e) == 400 and not _de_novo:
+                self._existentes = None
+                return self.carregar(_de_novo=True)
+            raise
+        blocos = resposta.get("valueRanges", [])
+        if len(blocos) != len(nomes):
+            raise RuntimeError(f"pedi {len(nomes)} abas e a planilha devolveu {len(blocos)}")
+        valores = {n: b.get("values", []) for n, b in zip(nomes, blocos)}
+        return {chave: linhas_de_valores(valores.get(aba, [])) for aba, chave in _CHAVE_DA_ABA.items()}
 
     def get_config(self) -> dict:
-        import gspread
-        try:
-            valores = self._planilha().worksheet(ABA_CONFIG).get_all_values()
-        except gspread.WorksheetNotFound:
+        if ABA_CONFIG not in self._abas_existentes():
             return {}
+        valores = self._gc.http_client.values_get(self._id, f"'{ABA_CONFIG}'").get("values", [])
         return {l[0].strip(): l[1].strip() for l in valores[1:] if len(l) >= 2 and l[0].strip()}
 
     # Escrita -----------------------------------------------------------------
@@ -199,6 +277,25 @@ class Planilha:
         ws.delete_rows(linha)
         return True
 
+    # Abas de uma linha por registro (Jurídico) ---------------------------------
+
+    def criar_registro(self, aba: str, campos: dict) -> str:
+        rid = novo_id()
+        ws = self._aba(aba, HEADERS_DA_ABA[aba])
+        ws.append_row(_linha(ws.row_values(1), {**campos, "ID": rid}), value_input_option="RAW",
+                      table_range="A1")
+        return rid
+
+    def atualizar_registro(self, aba: str, rid: str, campos: dict) -> bool:
+        """A linha é achada pelo ID na hora de gravar (nunca por número de linha lido antes)."""
+        ws = self._aba(aba, HEADERS_DA_ABA[aba])
+        cab = ws.row_values(1)
+        ids = ws.col_values(cab.index("ID") + 1)
+        if rid not in ids[1:]:
+            return False
+        self._atualizar(ws, ids.index(rid) + 1, cab, campos)
+        return True
+
 
 # ── Arquivo local (só para testar no PC) ──────────────────────────────────────
 
@@ -211,6 +308,10 @@ class Local:
             self._gravar({"cobrancas": [], "parcelas": [], "config": {}})
 
     def _ler(self) -> dict:
+        # Só para teste: imita a planilha fora do ar enquanto o arquivo COBRANCA_FALHA existir
+        falha = os.environ.get("COBRANCA_FALHA", "").strip()
+        if falha and os.path.exists(falha):
+            raise RuntimeError("planilha fora do ar (simulado no teste)")
         # O arquivo pode sumir com o app ligado (pasta temporária limpa): recomeça vazio
         if not os.path.exists(self._caminho):
             self._gravar({"cobrancas": [], "parcelas": [], "config": {}})
@@ -228,7 +329,9 @@ class Local:
     def carregar(self) -> dict:
         d = self._ler()
         return {"cobrancas": self._como_planilha(d["cobrancas"], COBRANCAS_HEADERS),
-                "parcelas": self._como_planilha(d["parcelas"], PARCELAS_HEADERS)}
+                "parcelas": self._como_planilha(d["parcelas"], PARCELAS_HEADERS),
+                "judiciais": self._como_planilha(d.get("judiciais", []), JUDICIAL_HEADERS),
+                "protestos": self._como_planilha(d.get("protestos", []), PROTESTOS_HEADERS)}
 
     def get_config(self) -> dict:
         return dict(self._ler().get("config", {}))
@@ -281,6 +384,23 @@ class Local:
                          if not (p.get("ID Cobrança") == cid and p.get("Nº") == str(n))]
         self._gravar(d)
         return len(d["parcelas"]) < antes
+
+    def criar_registro(self, aba: str, campos: dict) -> str:
+        d = self._ler()
+        rid = novo_id()
+        campos = {**campos, "ID": rid}
+        d.setdefault(_CHAVE_DA_ABA[aba], []).append({h: _celula(campos.get(h)) for h in HEADERS_DA_ABA[aba]})
+        self._gravar(d)
+        return rid
+
+    def atualizar_registro(self, aba: str, rid: str, campos: dict) -> bool:
+        d = self._ler()
+        for linha in d.get(_CHAVE_DA_ABA[aba], []):
+            if linha.get("ID") == rid:
+                linha.update({k: _celula(v) for k, v in campos.items() if k in HEADERS_DA_ABA[aba]})
+                self._gravar(d)
+                return True
+        return False
 
 
 def excluir_cobranca(banco, cid: str, hoje: date) -> bool:
