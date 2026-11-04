@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import date
 
-from nucleo import (COBRANCAS_HEADERS, JUDICIAL_HEADERS, PARCELAS_HEADERS, PROTESTOS_HEADERS,
+from nucleo import (COBRANCAS_HEADERS, HISTORICO_HEADERS, JUDICIAL_HEADERS, PARCELAS_HEADERS, PROTESTOS_HEADERS,
                     SITUACAO_ATIVA, SITUACAO_EXCLUIDA, data_br, linhas_de_valores, valor_planilha)
 
 ABA_COBRANCAS = "_Cobrancas"
@@ -26,6 +26,7 @@ ABA_PARCELAS  = "_Parcelas"
 ABA_CONFIG    = "_Config"
 ABA_JUDICIAL  = "_Judicial"    # Jurídico (pedido 03/11): cobranças judiciais
 ABA_PROTESTOS = "_Protestos"   # Jurídico (pedido 03/11): protestos
+ABA_HISTORICO = "_Historico_Juridico"   # toda gravação do Jurídico, só acrescenta (auditoria 04/11)
 CONFIG_HEADERS = ["Chave", "Valor"]
 
 # Abas de "uma linha por registro, achado pelo ID" (gravadas por criar_registro/atualizar_registro)
@@ -279,21 +280,32 @@ class Planilha:
 
     # Abas de uma linha por registro (Jurídico) ---------------------------------
 
-    def criar_registro(self, aba: str, campos: dict) -> str:
+    def _historico(self, aba: str, rid: str, historico: dict, antes: dict, depois: dict):
+        ws = self._aba(ABA_HISTORICO, HISTORICO_HEADERS)
+        ws.append_row(_linha(ws.row_values(1), linha_historico(aba, rid, historico, antes, depois)),
+                      value_input_option="RAW", table_range="A1")
+
+    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None) -> str:
         rid = novo_id()
         ws = self._aba(aba, HEADERS_DA_ABA[aba])
-        ws.append_row(_linha(ws.row_values(1), {**campos, "ID": rid}), value_input_option="RAW",
-                      table_range="A1")
+        linha = {**campos, "ID": rid}
+        if historico is not None:   # o rastro vem ANTES: se a gravação falhar, sobra só o rastro
+            self._historico(aba, rid, historico, {}, linha)
+        ws.append_row(_linha(ws.row_values(1), linha), value_input_option="RAW", table_range="A1")
         return rid
 
-    def atualizar_registro(self, aba: str, rid: str, campos: dict) -> bool:
+    def atualizar_registro(self, aba: str, rid: str, campos: dict, historico: dict | None = None) -> bool:
         """A linha é achada pelo ID na hora de gravar (nunca por número de linha lido antes)."""
         ws = self._aba(aba, HEADERS_DA_ABA[aba])
         cab = ws.row_values(1)
         ids = ws.col_values(cab.index("ID") + 1)
         if rid not in ids[1:]:
             return False
-        self._atualizar(ws, ids.index(rid) + 1, cab, campos)
+        linha = ids.index(rid) + 1
+        if historico is not None:
+            antes = dict(zip(cab, ws.row_values(linha)))
+            self._historico(aba, rid, historico, antes, campos)
+        self._atualizar(ws, linha, cab, campos)
         return True
 
 
@@ -385,22 +397,40 @@ class Local:
         self._gravar(d)
         return len(d["parcelas"]) < antes
 
-    def criar_registro(self, aba: str, campos: dict) -> str:
+    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None) -> str:
         d = self._ler()
         rid = novo_id()
         campos = {**campos, "ID": rid}
         d.setdefault(_CHAVE_DA_ABA[aba], []).append({h: _celula(campos.get(h)) for h in HEADERS_DA_ABA[aba]})
+        if historico is not None:
+            d.setdefault("historico", []).append(linha_historico(aba, rid, historico, {}, campos))
         self._gravar(d)
         return rid
 
-    def atualizar_registro(self, aba: str, rid: str, campos: dict) -> bool:
+    def atualizar_registro(self, aba: str, rid: str, campos: dict, historico: dict | None = None) -> bool:
         d = self._ler()
         for linha in d.get(_CHAVE_DA_ABA[aba], []):
             if linha.get("ID") == rid:
+                if historico is not None:
+                    d.setdefault("historico", []).append(linha_historico(aba, rid, historico, dict(linha), campos))
                 linha.update({k: _celula(v) for k, v in campos.items() if k in HEADERS_DA_ABA[aba]})
                 self._gravar(d)
                 return True
         return False
+
+    def historico(self) -> list:
+        return list(self._ler().get("historico", []))
+
+
+def linha_historico(aba: str, rid: str, historico: dict, antes: dict, depois: dict) -> dict:
+    """Uma linha da aba _Historico_Juridico. Antes/Depois: só os campos que a gravação mexeu, em JSON."""
+    mexidos = [k for k in depois if k != "ID"] or list(antes)
+    return {
+        "Quando": historico.get("Quando", ""), "Quem": historico.get("Quem", ""), "Aba": aba, "ID": rid,
+        "Ação": historico.get("Ação", ""),
+        "Antes": json.dumps({k: antes.get(k, "") for k in mexidos if k in antes}, ensure_ascii=False),
+        "Depois": json.dumps({k: _celula(depois.get(k)) for k in mexidos}, ensure_ascii=False),
+    }
 
 
 def excluir_cobranca(banco, cid: str, hoje: date) -> bool:

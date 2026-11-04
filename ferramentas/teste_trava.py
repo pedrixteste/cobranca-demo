@@ -42,6 +42,14 @@ def botoes(page):
     return [" ".join(b.inner_text().split()) for b in page.locator("button:visible").all()]
 
 
+
+def acesso_tudo(page):
+    """Desde 04/11 'Adicionar pessoa' exige escolher o acesso: marca 'Tudo' (se ainda não estiver marcado)."""
+    # tocar em "Só Jurídico" e depois em "Tudo" deixa "Tudo" marcado, esteja como estiver antes
+    for opcao in ("Só Jurídico", "Tudo"):
+        page.locator(".st-key-cf_novo_acesso button", has_text=opcao).first.click()
+        esperar(page, 900)
+
 with sync_playwright() as p:
     b = p.chromium.launch()
     dev = p.devices["Pixel 5"]
@@ -77,7 +85,7 @@ with sync_playwright() as p:
 
     # 5. Pedro adiciona a Gabi
     botao(A, "Configurações")
-    A.locator("input[aria-label='Nome']").fill("Gabi"); botao(A, "Adicionar")
+    A.locator("input[aria-label='Nome']").fill("Gabi"); acesso_tudo(A); botao(A, "Adicionar")
     confere("Gabi aparece em Configurações como 'Ainda não entrou'", tem(A, "Ainda não entrou"))
 
     # 6. A Gabi escolhe o nome no aparelho dela
@@ -112,7 +120,7 @@ with sync_playwright() as p:
 
     # 10. Migração: atalho antigo ?quem=Nome de uma pessoa ainda sem aparelho
     A.goto(endereco_pedro); esperar(A, 6000); botao(A, "Configurações")
-    A.locator("input[aria-label='Nome']").fill("Ana"); botao(A, "Adicionar")
+    A.locator("input[aria-label='Nome']").fill("Ana"); acesso_tudo(A); botao(A, "Adicionar")
     F = aparelho(URL + "/?quem=Ana")
     confere("atalho antigo ?quem=Ana entra direto e prende", tem(F, "Usando como") and "Ana" in F.locator(".hm-quem").inner_text())
     G = aparelho(URL + "/?quem=Ana")

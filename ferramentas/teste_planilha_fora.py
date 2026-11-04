@@ -118,8 +118,9 @@ try:
                 ("Quem está usando?" in t and "Ana" in t and outra.locator("input[aria-label='Seu nome']").count() == 0),
                 t[:200].replace("\n", " | "))
 
-        # 4. volta de novo
+        # 4. volta de novo (o "Tentar de novo" força a releitura no máximo 1x a cada 20 s para o app inteiro)
         falha.unlink()
+        page.wait_for_timeout(21000)
         botao(page, "Tentar de novo")
         t = corpo(page)
         confere("4. planilha voltou: tela inicial normal, sem aviso", AVISO not in t and "Usando como Pedro" in t

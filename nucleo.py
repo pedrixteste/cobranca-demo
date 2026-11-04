@@ -33,6 +33,7 @@ híbrida depois (uma parcela trocou de forma, ou foi recebida metade em cada).
 from __future__ import annotations
 
 import calendar
+import math
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
@@ -86,6 +87,18 @@ MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
 
 def _txt(v) -> str:
     return "" if v is None else str(v).strip()
+
+
+_RE_SINAIS = re.compile(r"[<>\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def texto_limpo(v) -> str:
+    """
+    Nome digitado (cliente, advogado, turma): uma linha só, espaços simples, sem < > nem caracteres
+    de controle. Parênteses, & e outros sinais de nome de verdade ficam. A proteção contra Markdown
+    (imagem/link) é feita na hora de MOSTRAR: _e() no HTML e _rotulo() nos rótulos (app.py).
+    """
+    return " ".join(_RE_SINAIS.sub(" ", _txt(v)).split())
 
 
 def sem_acento(s: str) -> str:
@@ -146,6 +159,8 @@ def treinamentos_das_turmas(turmas: list[str]) -> list[str]:
 
 # ── Valores ───────────────────────────────────────────────────────────────────
 
+VALOR_MAXIMO_LIDO = 1e10   # R$ 10 bilhões: acima disso, valor da planilha/campo é tratado como ilegível
+
 _RE_BR      = re.compile(r"\d{1,3}(\.\d{3})+(,\d+)?|\d+(,\d+)?")
 _RE_DECIMAL = re.compile(r"\d+\.\d{1,2}")
 
@@ -173,6 +188,10 @@ def valor_para_float(v) -> float | None:
     elif _RE_DECIMAL.fullmatch(txt):
         val = float(txt)
     else:
+        return None
+    # Número absurdo (ex.: 2 seguido de 300 zeros) vira "ilegível": senão as contas da tela
+    # estouram e a lista inteira cai para todo mundo (achado da auditoria de 04/11)
+    if not math.isfinite(val) or val > VALOR_MAXIMO_LIDO:
         return None
     return -val if negativo else val
 
@@ -856,11 +875,67 @@ def login_google_ligado(config: dict) -> bool:
     return chave_busca(config.get("login_google", "")) == "sim"
 
 
-def nomes_livres(config: dict) -> list[str]:
-    """Nomes que um aparelho novo pode escolher: sem aparelho preso, ou liberados pelo administrador."""
+def codigo_aparelho(aparelho) -> str:
+    """Código curto (6 letras) que o aparelho novo mostra na tela, para o administrador liberar SÓ ele."""
+    return re.sub(r"[^a-f0-9]", "", _txt(aparelho).lower())[:6].upper()
+
+
+def liberacao_por_codigo(config: dict) -> bool:
+    """Existe (ou já existiu) alguém Só Jurídico: na trava por aparelho, celular novo só entra com o
+    código liberado pelo administrador. A marca "liberacao_por_codigo" fica mesmo depois de a pessoa
+    sair, senão a aba que ela deixou aberta voltaria a poder escolher um nome livre."""
+    return bool(pessoas_restritas(config)) or chave_busca(config.get("liberacao_por_codigo", "")) == "sim"
+
+
+def nomes_livres(config: dict, aparelho: str = "") -> list[str]:
+    """
+    Nomes que um aparelho novo pode escolher (só na trava por aparelho, sem a entrada com Google).
+    Normal: sem aparelho preso, ou liberados pelo administrador ("sim").
+    Com liberacao_por_codigo (pedido 04/11, acesso Só Jurídico): SÓ o nome que o administrador
+    liberou para ESTE aparelho. A liberação guarda o código COMPLETO do aparelho (24 letras): o curto
+    de 6 letras que aparece na tela só serve para o app achar o aparelho certo (3ª auditoria: as 6
+    letras dava para fabricar mexendo no endereço).
+    """
     presos = aparelhos_por_pessoa(config)
+    if liberacao_por_codigo(config):
+        meu = _txt(aparelho).lower()
+        return [p for p in pessoas_da_config(config)
+                if len(meu) >= 16 and _txt(config.get(f"liberado:{p}", "")).lower() == meu]
     return [p for p in pessoas_da_config(config)
             if not presos[p] or chave_busca(config.get(f"liberado:{p}", "")) == "sim"]
+
+
+# ── Acesso por pessoa (pedido 04/11) ──────────────────────────────────────────
+# _Config "acesso:<nome>" = "juridico" → a pessoa só vê o Jurídico (cobranças judiciais e protestos):
+# nada de cobranças, relatório, notificações, feriados ou configurações, e não recebe aviso no
+# Telegram. Qualquer outro valor (ou nada) = acesso a tudo, como sempre foi. O administrador
+# sempre tem acesso a tudo (senão ficaria sem a tela de Configurações).
+
+ACESSO_TUDO = ""
+ACESSO_JURIDICO = "juridico"
+
+
+def acesso_da_pessoa(config: dict, nome: str, fora_da_lista_restringe: bool = True) -> str:
+    """
+    Fecha por padrão (auditoria de 04/11): acesso a TUDO só para o administrador, ou para quem está
+    na lista de pessoas com o acesso vazio ou "tudo". Quem saiu da lista, ou tem qualquer outra coisa
+    escrita (ex.: "só jurídico" digitado à mão na planilha), fica só com o Jurídico.
+    """
+    if not _txt(nome):
+        return ACESSO_TUDO   # ninguém identificado: quem barra é a tela de entrada, não esta regra
+    if nome == administrador(config):
+        return ACESSO_TUDO
+    if fora_da_lista_restringe and nome not in pessoas_da_config(config):
+        return ACESSO_JURIDICO
+    return ACESSO_TUDO if chave_busca(config.get(f"acesso:{nome}", "")) in ("", "tudo") else ACESSO_JURIDICO
+
+
+def so_juridico(config: dict, nome: str, fora_da_lista_restringe: bool = True) -> bool:
+    return acesso_da_pessoa(config, nome, fora_da_lista_restringe) == ACESSO_JURIDICO
+
+
+def pessoas_restritas(config: dict) -> list[str]:
+    return [p for p in pessoas_da_config(config) if so_juridico(config, p)]
 
 
 # ── Preferências de notificação (aba _Config, iguais para todo mundo) ─────────
@@ -886,11 +961,15 @@ def opcoes_avisos(config: dict) -> dict:
 
 
 def destinatarios(config: dict) -> list[tuple]:
-    """[(nome, chat_id)] de quem está conectado e não pausou os avisos."""
+    """[(nome, chat_id)] de quem está conectado e não pausou os avisos. Só quem ainda está na lista de
+    pessoas e tem acesso a TUDO: quem foi removido, ou só vê o Jurídico, não recebe as cobranças."""
     saida = []
+    pessoas = pessoas_da_config(config)
     for chave, valor in config.items():
         if chave.startswith("telegram:") and _txt(valor):
             nome = chave[len("telegram:"):]
+            if nome not in pessoas or so_juridico(config, nome):
+                continue
             if _ligado(config, f"avisos:{nome}"):
                 saida.append((nome, _txt(valor)))
     return sorted(saida)
@@ -940,9 +1019,15 @@ _GRAVIDADE_JUD = {CLI_ATRASADO: 0, CLI_EM_BREVE: 1, JUD_SEM_ACORDO: 2, CLI_EM_DI
 
 JUDICIAL_HEADERS = ["ID", "Cliente", "Turma", "Objeto", "Valor cobrado", "No jurídico desde", "Advogado",
                     "Negociação", "Valor do acordo", "Acordo", "Cadastrada por", "Criada em",
-                    "Situação", "Excluída em"]
+                    "Situação", "Excluída em", "Alterada por", "Alterada em", "Excluída por"]
 PROTESTOS_HEADERS = ["ID", "Cliente", "Turma", "Objeto", "Protestado em", "Pago", "Pago em", "Marcado por",
-                     "Cadastrado por", "Criado em", "Situação", "Excluído em"]
+                     "Cadastrado por", "Criado em", "Situação", "Excluído em", "Alterado por", "Alterado em",
+                     "Excluído por"]
+# Histórico do Jurídico (auditoria de 04/11): toda gravação acrescenta uma linha, nunca apaga nem muda.
+# Guarda como a linha estava ANTES e como ficou, para saber quem mexeu e desfazer à mão.
+HISTORICO_HEADERS = ["Quando", "Quem", "Aba", "ID", "Ação", "Antes", "Depois"]
+
+MAX_PARCELAS_ACORDO = 120   # acordo maior que isso é engano (ou tentativa de travar o app)
 
 _SEP_ACORDO = " | "
 
@@ -970,6 +1055,8 @@ def acordo_do_texto(txt) -> list[dict]:
     data, para continuar aparecendo na tela em vez de sumir calada."""
     parcelas = []
     for linha in _txt(txt).splitlines():
+        if len(parcelas) >= MAX_PARCELAS_ACORDO:
+            break   # célula gigante (mexida à mão) não trava a ficha
         partes = [x.strip() for x in linha.split("|")]
         if not any(partes):
             continue
@@ -1050,13 +1137,13 @@ def montar_judiciais(linhas: list[dict], hoje: date, incluir_excluidas: bool = F
         turmas = _turmas_da_linha(l.get("Turma"))
         saida.append({
             "id": jid,
-            "cliente": _txt(l.get("Cliente")),
-            "turma": SEP_TURMAS_TELA.join(turmas),   # "L345" ou "L345 + V12"
+            "cliente": texto_limpo(l.get("Cliente")),
+            "turma": texto_limpo(SEP_TURMAS_TELA.join(turmas)),   # "L345" ou "L345 + V12"
             "turmas": turmas,
-            "objeto": _txt(l.get("Objeto")),
+            "objeto": texto_limpo(l.get("Objeto")),
             "valor": valor_para_float(l.get("Valor cobrado")) or 0.0,
             "desde": parse_data(l.get("No jurídico desde")),
-            "advogado": _txt(l.get("Advogado")),
+            "advogado": texto_limpo(l.get("Advogado")),
             "negociacao": neg,
             "valor_acordo": valor_para_float(l.get("Valor do acordo")) or sum(p["valor"] for p in ps),
             "parcelas": ps,
@@ -1092,10 +1179,10 @@ def montar_protestos(linhas: list[dict], incluir_excluidos: bool = False) -> lis
         pago = chave_busca(l.get("Pago")) in ("sim", "pago", "x")
         saida.append({
             "id": pid,
-            "cliente": _txt(l.get("Cliente")),
-            "turma": SEP_TURMAS_TELA.join(turmas),
+            "cliente": texto_limpo(l.get("Cliente")),
+            "turma": texto_limpo(SEP_TURMAS_TELA.join(turmas)),
             "turmas": turmas,
-            "objeto": _txt(l.get("Objeto")),
+            "objeto": texto_limpo(l.get("Objeto")),
             "protestado_em": parse_data(l.get("Protestado em")),
             "pago": pago,
             "pago_em": parse_data(l.get("Pago em")) if pago else None,

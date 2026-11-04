@@ -1,5 +1,6 @@
 import html as _html
 import json
+import math
 import os
 import re
 import time
@@ -67,7 +68,10 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     JUD_SEM_ACORDO, NEG_A_VISTA, NEG_PARCELADO, NEG_SEM, OBJETOS, ROTULO_JUD, SITUACAO_ATIVA,
                     SITUACAO_EXCLUIDA, acordo_para_texto, advogados_usados, casa_busca_juridico,
                     marcar_parcela_acordo, montar_judiciais, montar_protestos, ordenar_judiciais,
-                    ordenar_protestos, parcelas_do_acordo, resumo_juridico)
+                    ordenar_protestos, parcelas_do_acordo, resumo_juridico,
+                    # Acesso só ao Jurídico (pedido 04/11)
+                    ACESSO_JURIDICO, MAX_PARCELAS_ACORDO, codigo_aparelho, liberacao_por_codigo,
+                    pessoas_restritas, so_juridico, texto_limpo)
 
 MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho",
          "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -214,6 +218,15 @@ def _falhou_ha_pouco(chave: str) -> bool:
     return quando is not None and time.monotonic() - quando < ESPERA_DEPOIS_DE_FALHA
 
 
+def _pode_limpar_cache() -> bool:
+    """No máximo uma releitura forçada a cada 20 s para o APP INTEIRO (abrir abas novas não fura)."""
+    est = _estado_planilha()
+    if time.monotonic() - est.get("limpou_em", -1e9) < ESPERA_DEPOIS_DE_FALHA:
+        return False
+    est["limpou_em"] = time.monotonic()
+    return True
+
+
 def _anotar_falha(chave: str, erro: Exception):
     est = _estado_planilha()
     est[chave] = time.monotonic()
@@ -233,6 +246,8 @@ def _aviso_planilha_fora():
           "toque em <b>Tentar de novo</b>.", "cx-perigo")
     if st.button("Tentar de novo", key="btn_tentar_de_novo", icon=":material/refresh:", type="primary",
                  use_container_width=True):
+        if (_usuario() and _so_juridico()) or not _pode_limpar_cache():
+            st.rerun()   # só força a releitura uma vez a cada 20 s para o app inteiro
         est = _estado_planilha()
         est.pop("config_falhou", None)
         est.pop("dados_falhou", None)
@@ -240,7 +255,7 @@ def _aviso_planilha_fora():
         _ler_config.clear()
         st.rerun()
     detalhe = _estado_planilha().get("erro", "")
-    if detalhe:
+    if detalhe and _sou_admin_sem_ler():
         st.markdown(f"<div class='cx-dica'>Detalhe: {_e(detalhe[:180])}</div>", unsafe_allow_html=True)
 
 
@@ -263,7 +278,11 @@ def _dados():
 
 
 def _cobrancas(incluir_excluidas: bool = False):
-    """Cobranças já calculadas. None se a planilha não pôde ser lida (aviso já mostrado)."""
+    """Cobranças já calculadas. None se a planilha não pôde ser lida (aviso já mostrado).
+    Quem só tem acesso ao Jurídico nunca recebe cobrança nenhuma, venha o pedido de onde vier
+    (segunda trava, além do roteador)."""
+    if _so_juridico() or (_usuario() and not _sessao_ok()):
+        return None
     d = _dados()
     if d is None:
         return None
@@ -360,6 +379,8 @@ def _tamanho_atual() -> str:
 
 
 def _mudar_tamanho():
+    if _so_juridico() or not _sessao_ok():
+        return   # roda antes do roteador: quem é Só Jurídico não muda nada que vale para todos
     novo = st.session_state.get("_seg_tamanho")
     if novo not in TAMANHOS:
         # Tocar de novo na opção marcada desmarca: volta para a que estava
@@ -386,7 +407,44 @@ st.markdown(
 
 def _e(texto) -> str:
     """Escapa texto que vai para HTML. Tudo que vem da planilha passa por aqui."""
-    return _html.escape(str(texto if texto is not None else ""))
+    # Quebra de linha vira <br>: uma linha em branco dentro do st.markdown fechava o bloco HTML e o
+    # resto virava Markdown (imagem/link de fora na tela de quem abrisse; auditoria de 04/11)
+    return _html.escape(str(texto if texto is not None else "")).replace("\r", "").replace("\n", "<br>")
+
+
+_RE_MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+\-.!|:~<>$])")
+
+
+def _rotulo(texto) -> str:
+    """Texto que vira RÓTULO de botão, pílula ou aviso (o Streamlit lê Markdown ali): uma linha só e
+    com os sinais do Markdown neutralizados, para um nome digitado nunca virar imagem ou link."""
+    return _RE_MARKDOWN.sub(r"\\\1", " ".join(str(texto or "").split()))
+
+
+def _sou_admin_sem_ler() -> bool:
+    try:
+        return _sou_admin()
+    except Exception:
+        return False
+
+
+def _erro_curto(e: Exception) -> str:
+    """Motivo do erro para a tela: completo só para o administrador (pode trazer o código da planilha);
+    para os outros, só o tipo. O completo vai sempre para o registro (Manage app → logs)."""
+    print(f"[erro] {e!r}", flush=True)
+    try:
+        return str(e) if _sou_admin() else type(e).__name__
+    except Exception:
+        return type(e).__name__
+
+
+def _pct(pago: float, total: float) -> int:
+    """Porcentagem da barrinha, sempre entre 0 e 100 (valor absurdo não derruba a tela)."""
+    try:
+        r = 100 * (pago / total) if total else 0
+        return int(round(min(100, max(0, r)))) if math.isfinite(r) else 0
+    except (ZeroDivisionError, OverflowError, ValueError, TypeError):
+        return 0
 
 
 def _url_segura(url) -> str:
@@ -406,7 +464,7 @@ def _flash(msg: str, icone: str = "✅"):
 
 def _mostrar_flash():
     for msg, icone in st.session_state.pop("_flash", []):
-        st.toast(msg, icon=icone)
+        st.toast(_rotulo(msg), icon=icone)
 
 
 def _cabecalho(titulo: str, voltar_para: str, subtitulo: str = ""):
@@ -435,6 +493,7 @@ def _num_br(x: float) -> str:
     return formatar_brl(x).replace("R$ ", "")
 
 
+VALOR_MAXIMO_CAMPO = 100_000_000   # R$ 100 milhões: acima disso é engano (ou tentativa de travar a tela)
 MARCA_VALOR = "__rs"   # fim da chave de todo campo de valor: o script _JS_CAMPOS põe ponto do milhar e ",00"
 
 
@@ -444,11 +503,11 @@ def _valor(rotulo: str, key: str, placeholder: str = "0,00", help: str = None):
     ok False = digitou algo que não é valor (o aviso já aparece embaixo).
     Enquanto a pessoa digita, o navegador já mostra '1.500,00' (ver _JS_CAMPOS).
     """
-    txt = st.text_input(rotulo, key=key + MARCA_VALOR, placeholder=placeholder, help=help)
+    txt = st.text_input(rotulo, key=key + MARCA_VALOR, placeholder=placeholder, help=help, max_chars=20)
     if not txt.strip():
         return None, True
     v = valor_para_float(txt)
-    if v is None or v < 0:
+    if v is None or v < 0 or v > VALOR_MAXIMO_CAMPO:
         _erro_campo("Valor inválido. Ex.: 1500 ou 1.500,50")
         return None, False
     return v, True
@@ -484,7 +543,7 @@ def _cartao_toque(chave_container: str, chave_botao: str, rotulo: str, html_cart
     """Cartão inteiro tocável: o botão fica invisível por cima dele."""
     with st.container(key=chave_container):
         st.markdown(html_cartao, unsafe_allow_html=True)
-        return st.button(rotulo, key=chave_botao)
+        return st.button(_rotulo(rotulo), key=chave_botao)
 
 
 def _cartao_inicio(chave_container, chave_botao, rotulo, classe, icone, titulo, descricao, chips=""):
@@ -607,6 +666,29 @@ def _sou_admin() -> bool:
     return bool(_usuario()) and _usuario() == administrador(_config())
 
 
+def _so_juridico() -> bool:
+    """Quem está usando só pode ver o Jurídico (Configurações → Acesso: Só Jurídico). Na demonstração,
+    "Recomeçar o exemplo" apaga a lista de pessoas: lá, estar fora da lista não restringe."""
+    return bool(_usuario()) and so_juridico(_config(), _usuario(), fora_da_lista_restringe=not _modo_demo())
+
+
+def _sessao_ok(cfg: dict | None = None) -> bool:
+    """Quem está usando ainda é quem diz ser (Gmail ou aparelho ainda ligados ao nome, e o nome ainda na
+    lista). Usa a configuração guardada (barato); o roteador já confere a cada tela, e isto cobre o que
+    roda FORA dele: callbacks e janelinhas (auditoria de 04/11)."""
+    quem = _usuario()
+    if not quem:
+        return False
+    if _modo_demo():
+        return True
+    cfg = _config() if cfg is None else cfg
+    if quem not in pessoas_da_config(cfg):
+        return False
+    if _login_ligado():
+        return pessoa_do_email(cfg, _email_google()) == quem
+    return nome_do_aparelho(cfg, _aparelho()) == quem
+
+
 def _codigo_limpo(v) -> str:
     v = re.sub(r"[^a-f0-9]", "", str(v or "").lower())
     return v if 16 <= len(v) <= 64 else ""
@@ -690,11 +772,11 @@ def _prender(aparelho: str, nome: str, pessoas: list):
         if not existente:
             b.save_config("pessoas", ", ".join(pessoas + [final]))
         b.save_config(f"aparelho:{aparelho}", final)
-        if chave_busca(_config().get(f"liberado:{final}", "")) == "sim":
+        if str(_config().get(f"liberado:{final}", "")).strip():
             b.save_config(f"liberado:{final}", "")   # a liberação vale para UM aparelho
         _ler_config.clear()
     except Exception as e:
-        st.error(f"Não consegui guardar: {e}")
+        st.error(f"Não consegui guardar: {_erro_curto(e)}")
         return
     st.session_state["_quem"] = final
     st.session_state.pop("_trocando", None)
@@ -809,10 +891,12 @@ def _identificado() -> bool:
     """True se já se sabe quem está usando; senão mostra a tela certa e devolve False."""
     if _banco() is not None and _login_ligado():
         return _identificado_google()
-    if st.session_state.get("_quem"):
-        return True
     if _banco() is None:
         return True   # sem planilha configurada: a tela inicial mostra o erro
+    travado = _travado()
+    quem = st.session_state.get("_quem")
+    if quem and not travado:
+        return True   # demonstração: sem trava
 
     aparelho = _aparelho()
     if not aparelho:
@@ -826,13 +910,26 @@ def _identificado() -> bool:
     cfg = _config()
     trocando = st.session_state.get("_trocando")
     nome = nome_do_aparelho(cfg, aparelho)
+    if quem:
+        # Conferido a cada toque (auditoria de 04/11), como já é com o Google: pessoa removida ou
+        # aparelho desligado em Configurações sai na hora, mesmo com a página aberta
+        if nome == quem and not trocando:
+            return True
+        st.session_state.pop("_quem", None)
     if nome and not trocando:
         st.session_state["_quem"] = nome
         return True
 
-    travado = _travado()
     pessoas = pessoas_da_config(cfg)
-    livres = nomes_livres(cfg) if travado else pessoas
+    if travado and not pessoas and isinstance(_banco(), Planilha) and not _segredo("primeiro_acesso"):
+        # Planilha de verdade sem a lista de pessoas = _Config sumiu ou foi apagada. Não abre o
+        # "primeiro cadastro" (quem abrisse viraria administrador; auditoria de 04/11). Planilha NOVA
+        # de propósito (ex.: cópia para franqueado): pôr primeiro_acesso = true nos Secrets e tirar depois.
+        st.markdown("<div class='hm-marca' style='margin-top:.8rem'>Cobranças</div>", unsafe_allow_html=True)
+        _info("Não achei a lista de pessoas do app na planilha (aba <b>_Config</b>). Avise o Pedro.", "cx-perigo")
+        return False
+    por_codigo = travado and liberacao_por_codigo(cfg)
+    livres = nomes_livres(cfg, aparelho) if travado else pessoas
     # Atalho antigo, de antes da trava (?quem=Nome): entra direto e já prende o aparelho
     pedido = chave_busca(st.query_params.get("quem", ""))
     do_atalho = next((p for p in livres if pedido and chave_busca(p) == pedido), None)
@@ -868,16 +965,33 @@ def _identificado() -> bool:
         if livres:
             _info(f"Seu nome não está na lista? Peça para <b>{adm}</b> liberar o seu acesso.", "cx-nota")
         else:
-            _info(f"Este aparelho ainda não tem acesso. Peça para <b>{adm}</b> liberar o seu nome "
-                  "em <b>Configurações</b> e abra o app de novo.", "cx-perigo")
+            if por_codigo:
+                curto = _anotar_codigo(aparelho)
+                _info(f"Este aparelho ainda não tem acesso. Mostre para <b>{adm}</b> o código "
+                      f"<b class='cf-codigo'>{_e(curto)}</b>: em <b>Configurações</b>, no "
+                      "seu nome, ele toca em <b>Liberar novo aparelho</b> e digita esse código.", "cx-perigo")
+                if not aparelhos_por_pessoa(cfg).get(administrador(cfg)):
+                    # Saída só para quando o próprio administrador está sem nenhum aparelho
+                    st.markdown(f"<div class='cx-dica'>Administrador sem aparelho: na planilha, aba _Config, "
+                                f"acrescente a linha <b>liberado:{adm}</b> com o valor <b>{_e(aparelho)}</b>."
+                                "</div>", unsafe_allow_html=True)
+            else:
+                _info(f"Este aparelho ainda não tem acesso. Peça para <b>{adm}</b> liberar o seu nome "
+                      "em <b>Configurações</b> e abra o app de novo.", "cx-perigo")
             if st.button("Já liberaram, tentar de novo", key="quem_denovo", icon=":material/refresh:",
                          use_container_width=True):
-                _ler_config.clear()
+                # Relê a configuração no máximo a cada 20 s por aparelho (tocar sem parar não gasta a
+                # cota de leitura do Google de todo mundo)
+                if _pode_limpar_cache():
+                    _ler_config.clear()
                 st.rerun()
     return False
 
 
 # ── Configurações (só o administrador) ────────────────────────────────────────
+
+ACESSOS_TELA = ["Tudo", "Só Jurídico"]   # opções de acesso de cada pessoa (Configurações)
+
 
 def _config_varias(pares: dict) -> bool:
     try:
@@ -887,7 +1001,7 @@ def _config_varias(pares: dict) -> bool:
         return True
     except Exception as e:
         _ler_config.clear()
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return False
 
 
@@ -920,8 +1034,11 @@ def _secao_google(cfg: dict, adm: str):
             sem = [p for p, e in emails.items() if not e]
             if sem:
                 _info(f"Sem Gmail (não conseguem entrar): <b>{_e(', '.join(sem))}</b>.", "cx-falta")
-            if st.button("Desligar e voltar para a trava por aparelho", key="cf_gg_desligar",
-                         icon=":material/phonelink_lock:", type="tertiary"):
+            if pessoas_restritas(cfg):
+                _info("Com alguém em <b>Só Jurídico</b>, a entrada com Google não pode ser desligada: "
+                      "só ela garante quem é quem.", "cx-nota")
+            elif st.button("Desligar e voltar para a trava por aparelho", key="cf_gg_desligar",
+                           icon=":material/phonelink_lock:", type="tertiary"):
                 if _config_varias({"login_google": ""}):
                     _flash("Entrada com Google desligada: o app volta a reconhecer cada aparelho")
                     st.rerun()
@@ -967,26 +1084,57 @@ def tela_config():
     com_google = _login_configurado()
     ligado = com_google and login_google_ligado(cfg)
     emails = emails_por_pessoa(cfg)
+    por_codigo = liberacao_por_codigo(cfg)
 
     if com_google:
         _secao_google(cfg, adm)
+    if por_codigo and not ligado:
+        _info("Celular novo: a pessoa abre o app e vê um <b>código de 6 letras</b>. Toque em <b>Liberar novo "
+              "aparelho</b> no nome dela e digite esse código. Só aquele aparelho entra.", "cx-falta")
 
     for i, p in enumerate(pessoas):
         n = len(presos[p])
-        liberado = chave_busca(cfg.get(f"liberado:{p}", "")) == "sim"
+        liberado = bool(str(cfg.get(f"liberado:{p}", "")).strip())
         if ligado:
             estado = ("<span class='sit c-ok'>Com Gmail</span>" if emails[p]
                       else "<span class='sit c-atraso'>Sem Gmail</span>")
         elif liberado:
-            estado = "<span class='sit c-breve'>Liberado para 1 aparelho novo</span>"
+            cod = str(cfg.get(f"liberado:{p}", "")).strip()
+            estado = ("<span class='sit c-breve'>Liberado para 1 aparelho novo"
+                      + (f" ({_e(codigo_aparelho(cod))})" if cod.lower() != "sim" else "") + "</span>")
         elif n:
             estado = f"<span class='sit c-ok'>{n} aparelho{'s' if n > 1 else ''}</span>"
         else:
             estado = "<span class='sit c-neutro'>Ainda não entrou</span>"
-        telegram = "Telegram conectado" if cfg.get(f"telegram:{p}") else "Sem Telegram"
+        restrita = so_juridico(cfg, p)
+        telegram = ("Não recebe aviso no Telegram (só Jurídico)" if restrita
+                    else "Telegram conectado" if cfg.get(f"telegram:{p}") else "Sem Telegram")
         with st.container(key=f"sec_cf_{i}"):
             st.markdown(f"<div class='nt-pessoa'><span>{_e(p)}{' · administrador' if p == adm else ''}</span>{estado}</div>"
                         f"<div class='cf-meta'>{telegram}</div>", unsafe_allow_html=True)
+            # Acesso (pedido 04/11): tudo, ou só o Jurídico. O administrador sempre tem tudo.
+            if p != adm:
+                atual = ACESSOS_TELA[1] if restrita else ACESSOS_TELA[0]
+                escolha = st.segmented_control(f"Acesso de {p}", ACESSOS_TELA, default=atual,
+                                               key=f"cf_acesso_{i}_{atual}")
+                if escolha and escolha != atual:
+                    pares = {f"acesso:{p}": ACESSO_JURIDICO if escolha == ACESSOS_TELA[1] else ""}
+                    if escolha == ACESSOS_TELA[1]:
+                        pares["liberacao_por_codigo"] = "sim"
+                    if _config_varias(pares):
+                        _flash(f"{p}: " + ("agora só vê o Jurídico" if escolha == ACESSOS_TELA[1]
+                                           else "agora vê tudo"))
+                        st.rerun()
+                # Pessoa de confiança (pedido 04/11): sem o limite de gravações seguidas
+                if restrita:
+                    sem_lim = chave_busca(cfg.get(f"sem_limite:{p}", "")) == "sim"
+                    marcado = st.checkbox("Sem limite de gravações (pessoa de confiança)", value=sem_lim,
+                                          key=f"cf_semlim_{i}_{sem_lim}",
+                                          help="Desmarcado: no máximo 3 gravações por minuto, 20 a cada 10 minutos "
+                                               "e 60 por dia.")
+                    if marcado != sem_lim and _config_varias({f"sem_limite:{p}": "sim" if marcado else ""}):
+                        _flash(f"{p}: " + ("sem limite de gravações" if marcado else "com limite de gravações"))
+                        st.rerun()
             if com_google:
                 erro = f"_cf_email_erro_{i}"
                 if ligado and p == adm:
@@ -1008,8 +1156,25 @@ def tela_config():
             if not ligado:
                 c1, c2 = st.columns(2)
                 with c1:
-                    if n and not liberado and st.button("Liberar novo aparelho", key=f"cf_lib_{i}",
-                                                        icon=":material/add_to_home_screen:", use_container_width=True):
+                    # Com liberação por código (existe ou existiu alguém Só Jurídico): libera SÓ o aparelho
+                    # que mostrar esse código (ver nucleo.nomes_livres)
+                    if por_codigo and not liberado:
+                        cod = st.text_input(f"Código do aparelho de {p}", key=f"cf_cod_{i}", max_chars=6,
+                                            placeholder="Ex.: A1B2C3",
+                                            help="O código de 6 letras que aparece no aparelho novo.")
+                        if st.button("Liberar novo aparelho", key=f"cf_lib_{i}", icon=":material/add_to_home_screen:",
+                                     use_container_width=True):
+                            cod = "".join(ch for ch in cod.upper() if ch in "0123456789ABCDEF")
+                            completo = _codigos_pendentes().get(cod, (None, 0))[0] if len(cod) == 6 else None
+                            if not completo:
+                                _erro_campo("Código não encontrado. Peça para a pessoa abrir o app no aparelho "
+                                            "novo e ler o código que aparece agora.")
+                            elif _config_varias({f"liberado:{p}": completo}):
+                                _codigos_pendentes().pop(cod, None)
+                                _flash(f"{p} pode entrar no aparelho {cod}")
+                                st.rerun()
+                    elif n and not liberado and st.button("Liberar novo aparelho", key=f"cf_lib_{i}",
+                                                          icon=":material/add_to_home_screen:", use_container_width=True):
                         if _config_varias({f"liberado:{p}": "sim"}):
                             _flash(f"{p} pode escolher o nome em mais um aparelho")
                             st.rerun()
@@ -1042,6 +1207,10 @@ def tela_config():
             if st.button("Sim, remover", key="cf_rem_sim", use_container_width=True):
                 pares = {"pessoas": ", ".join(x for x in pessoas if x != alvo), f"telegram:{alvo}": "",
                          f"liberado:{alvo}": ""}
+                if cfg.get(f"acesso:{alvo}"):
+                    pares[f"acesso:{alvo}"] = ""
+                if cfg.get(f"sem_limite:{alvo}"):
+                    pares[f"sem_limite:{alvo}"] = ""
                 if cfg.get(f"email:{alvo}"):
                     pares[f"email:{alvo}"] = ""
                 pares.update({f"aparelho:{a}": "" for a in presos[alvo]})
@@ -1056,6 +1225,9 @@ def tela_config():
         gmail = (st.text_input("Gmail", key="cf_novo_email", max_chars=80, placeholder="nome@gmail.com",
                                help="O Gmail com que ela vai entrar no app.")
                  if com_google else "")
+        acesso_novo = st.segmented_control("Acesso", ACESSOS_TELA, default=None, key="cf_novo_acesso",
+                                           help="Só Jurídico: a pessoa vê só as cobranças judiciais e os "
+                                                "protestos. Nada de cobranças, relatório, avisos ou configurações.")
         if st.button("Adicionar", key="cf_add", type="primary", icon=":material/person_add:",
                      use_container_width=True):
             nome = " ".join(novo.replace(",", " ").replace(":", " ").split())
@@ -1070,12 +1242,25 @@ def tela_config():
                 _erro_campo("Esse e-mail não parece certo. Ex.: nome@gmail.com")
             elif gmail and dono_do_email(cfg, gmail):
                 _erro_campo(f"Esse Gmail já é de {dono_do_email(cfg, gmail)}.")
+            elif acesso_novo not in ACESSOS_TELA:
+                _erro_campo("Escolha o acesso: Tudo ou Só Jurídico.")
             else:
-                pares = {"pessoas": ", ".join(pessoas + [nome])}
+                pares = {}
+                # Acesso gravado ANTES do nome entrar na lista: a pessoa nunca existe, nem por um instante,
+                # com acesso a tudo
+                if acesso_novo == ACESSOS_TELA[1]:
+                    pares[f"acesso:{nome}"] = ACESSO_JURIDICO
+                    pares["liberacao_por_codigo"] = "sim"
+                elif cfg.get(f"acesso:{nome}"):
+                    pares[f"acesso:{nome}"] = ""   # sobra de alguém removido com o mesmo nome
                 if gmail:
                     pares[f"email:{nome}"] = gmail
+                pares["pessoas"] = ", ".join(pessoas + [nome])
                 if _config_varias(pares):
-                    _flash(f"{nome} adicionada. " + ("Peça para ela entrar com esse Gmail." if ligado
+                    for k in ("cf_novo", "cf_novo_email", "cf_novo_acesso"):
+                        st.session_state.pop(k, None)
+                    _flash(f"{nome} adicionada com acesso {acesso_novo}. "
+                           + ("Peça para ela entrar com esse Gmail." if ligado
                                                      else "Peça para ela abrir o app e escolher o nome."))
                     st.rerun()
     if ligado:
@@ -1225,7 +1410,7 @@ def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parc
             parcelas,
         )
     except Exception as e:
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return
     finally:
         st.session_state["_salvando"] = False
@@ -1856,7 +2041,7 @@ def _html_cliente(c: dict, hoje: date) -> str:
     """Cartão compacto (3 linhas finas) para caber mais gente na tela; a barrinha de quanto já
     foi pago fica na borda de baixo."""
     total = c["pago"] + c["falta"]
-    pct = int(round(100 * c["pago"] / total)) if total else 0
+    pct = _pct(c["pago"], total)
     quitado = c["situacao"] == CLI_QUITADO
     nota = "<span class='cc-nota'>obs</span>" if c["tem_obs"] else ""
     if c.get("permuta"):
@@ -2160,7 +2345,7 @@ def _dlg_receber(cid: str, n: int):
                 ok = _banco().atualizar_parcela(cid, n, {"Status": STATUS_PAGA, **pagamento,
                                                         **({"Vezes no cartão": vezes} if cartao else {})})
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         if not ok:
             st.error("Essa parcela não foi encontrada na planilha. Atualize a tela.")
@@ -2194,7 +2379,7 @@ def _dlg_ver(cid: str, n: int):
         try:
             _banco().atualizar_parcela(cid, n, {"Observação": obs.strip().upper()})
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Observação salva")
@@ -2217,7 +2402,7 @@ def _dlg_ver(cid: str, n: int):
                     _banco().atualizar_parcela(cid, n, {"Status": "", "Pago em": "", "Comprovante": "",
                                                         "Marcado por": ""})
                 except Exception as e:
-                    st.error(f"Não consegui salvar: {e}")
+                    st.error(f"Não consegui salvar: {_erro_curto(e)}")
                     return
                 _invalidar()
                 _flash("Pagamento desmarcado")
@@ -2259,7 +2444,7 @@ def _dlg_alterar(cid: str, n: int):
         try:
             _banco().atualizar_parcela(cid, n, campos)
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Alterado")
@@ -2284,7 +2469,7 @@ def _dlg_alterar(cid: str, n: int):
                 try:
                     _banco().remover_parcela(cid, n)
                 except Exception as e:
-                    st.error(f"Não consegui remover: {e}")
+                    st.error(f"Não consegui remover: {_erro_curto(e)}")
                     return
                 _invalidar()
                 _flash("Parcela removida")
@@ -2318,7 +2503,7 @@ def _dlg_adicionar(cid: str):
                                              "Valor": valor, "Forma": forma,
                                              **({"Vezes no cartão": vezes} if forma == TIPO_CARTAO else {})})
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Adicionado")
@@ -2339,7 +2524,7 @@ def _dlg_obs(cid: str):
         try:
             _banco().atualizar_cobranca(cid, {"Observações": txt.strip().upper()})
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Observação salva")
@@ -2387,7 +2572,7 @@ def _dlg_editar(cid: str):
         try:
             _banco().atualizar_cobranca(cid, campos)
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Dados salvos")
@@ -2411,7 +2596,7 @@ def _dlg_excluir(cid: str):
             try:
                 excluir_cobranca(_banco(), cid, _hoje())
             except Exception as e:
-                st.error(f"Não consegui excluir: {e}")
+                st.error(f"Não consegui excluir: {_erro_curto(e)}")
                 return
             _invalidar()
             _flash("Cobrança excluída")
@@ -2455,7 +2640,7 @@ def tela_cobranca():
         return
 
     total = c["pago"] + c["falta"]
-    pct = int(round(100 * c["pago"] / total)) if total else 0
+    pct = _pct(c["pago"], total)
     selo = "<span class='sit c-ok'>Quitado</span>" if c["situacao"] == CLI_QUITADO else _chip_sit(c["situacao"])
     ate = f"Vai até <b>{nome_mes(c['ultima'])}</b>" if c["ultima"] else ""
     quem = ""
@@ -2554,7 +2739,7 @@ def _ficha_permuta(c: dict):
     """Total (soma dos valores), retirado e saldo; cada valor com a data e cada retirada."""
     total = c["total_permuta"]
     retirado, saldo = c["pago"], c["saldo"]
-    pct = min(int(round(100 * retirado / total)), 100) if total else 0
+    pct = _pct(retirado, total)
     quem = ""
     if c["criada_por"] or c["criada_em"]:
         por = f" por <b>{_e(c['criada_por'])}</b>" if c["criada_por"] else ""
@@ -2658,7 +2843,7 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                 novo_total = total + valor
             b.atualizar_cobranca(cid, {"Valor Total": novo_total})   # "Valor Total" acompanha a soma
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Valor da permuta salvo")
@@ -2684,7 +2869,7 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                         _banco().remover_parcela(cid, n)
                         _banco().atualizar_cobranca(cid, {"Valor Total": total - p["valor"]})
                     except Exception as e:
-                        st.error(f"Não consegui remover: {e}")
+                        st.error(f"Não consegui remover: {_erro_curto(e)}")
                         return
                     _invalidar()
                     _flash("Valor removido")
@@ -2729,7 +2914,7 @@ def _dlg_retirada(cid: str, n: int | None = None):
                                                  "Status": STATUS_PAGA, "Forma": TIPO_PERMUTA,
                                                  "Marcado por": _usuario()})
         except Exception as e:
-            st.error(f"Não consegui salvar: {e}")
+            st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
         _invalidar()
         _flash("Retirada salva")
@@ -2754,7 +2939,7 @@ def _dlg_retirada(cid: str, n: int | None = None):
                     try:
                         _banco().remover_parcela(cid, n)
                     except Exception as e:
-                        st.error(f"Não consegui remover: {e}")
+                        st.error(f"Não consegui remover: {_erro_curto(e)}")
                         return
                     _invalidar()
                     _flash("Retirada removida")
@@ -2785,7 +2970,7 @@ def tela_excluidas():
                 try:
                     restaurar_cobranca(_banco(), c["id"])
                 except Exception as e:
-                    st.error(f"Não consegui restaurar: {e}")
+                    st.error(f"Não consegui restaurar: {_erro_curto(e)}")
                     return
                 _invalidar()
                 _flash(f"Cobrança de {c['cliente']} restaurada")
@@ -2827,8 +3012,27 @@ def _chips_juridico() -> str:
     return f"<div class='hm-chips'>{''.join(partes)}</div>" if partes else ""
 
 
+def _rodape_quem():
+    """'Usando como X · sair' (ou só o nome, na trava por aparelho), igual ao da tela inicial."""
+    if _usuario() and _login_ligado():
+        if st.button(f"Usando como {_usuario()} · sair", key="btn_sair_google", icon=":material/logout:",
+                     type="tertiary", help="Sai do Gmail neste aparelho. Para entrar de novo, é só tocar em "
+                                           "Entrar com Google."):
+            _sair_google()
+    elif _usuario():
+        st.markdown(f"<div class='hm-quem'>Usando como <b>{_e(_usuario())}</b></div>", unsafe_allow_html=True)
+
+
 def tela_juridico():
-    _cabecalho("Jurídico", voltar_para="inicio", subtitulo="Clientes cobrados na justiça e títulos protestados")
+    restrito = _so_juridico()
+    if restrito:
+        # Para quem só tem o Jurídico, esta é a tela inicial: sem "Voltar" (não há para onde voltar)
+        hoje = _hoje()
+        st.markdown(f"<div class='hm-data'>{DIAS_SEMANA_LONGO[hoje.weekday()]}, {hoje.day} de "
+                    f"{MESES[hoje.month - 1].lower()}</div><div class='hm-marca'>Jurídico</div>",
+                    unsafe_allow_html=True)
+    else:
+        _cabecalho("Jurídico", voltar_para="inicio", subtitulo="Clientes cobrados na justiça e títulos protestados")
     jur = _juridico()
     chips_jud = chips_prot = ""
     if jur:
@@ -2852,6 +3056,8 @@ def tela_juridico():
     if _cartao_inicio("hm_prot", "tq_prot", "Abrir protestos", "claro", SVG_PROTESTO,
                       "Protestos", "Cheque, promissória ou ficha protestados", chips_prot):
         _ir("protestos")
+    if restrito:
+        _rodape_quem()
 
 
 def _busca(chave: str, placeholder: str) -> str:
@@ -2861,8 +3067,8 @@ def _busca(chave: str, placeholder: str) -> str:
 
 def _campos_cliente_turma(prefixo: str, erros: list):
     """Nome do cliente e turma(s) do Jurídico. Devolve (cliente, turmas) e põe em `erros` o que falta."""
-    cliente = st.text_input("Nome do cliente", key=f"{prefixo}cliente", max_chars=80).strip()
-    turma_txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345",
+    cliente = texto_limpo(st.text_input("Nome do cliente", key=f"{prefixo}cliente", max_chars=80))
+    turma_txt = st.text_input("Turma", key=f"{prefixo}turma", placeholder="Ex.: L345", max_chars=40,
                               help="Letra do treinamento + número: L = LORAP, V = Vendas, I = Impacto, "
                                    "P = Perfil. Mais de uma turma: separe com vírgula. Ex.: L345, V12")
     turmas = normalizar_turmas(turma_txt)
@@ -2894,11 +3100,14 @@ def _dlg_excluir_juridico(aba: str, rid: str, o_que: str, volta: str):
             st.rerun()
     with c2:
         if st.button("Sim, excluir", key=f"_exj_{rid}_sim", use_container_width=True):
-            coluna = "Excluída em" if aba == ABA_JUDICIAL else "Excluído em"
+            if not _pode_gravar_juridico():
+                return
+            em, por = ("Excluída em", "Excluída por") if aba == ABA_JUDICIAL else ("Excluído em", "Excluído por")
             try:
-                ok = _banco().atualizar_registro(aba, rid, {"Situação": SITUACAO_EXCLUIDA, coluna: _hoje()})
+                ok = _banco().atualizar_registro(aba, rid, {"Situação": SITUACAO_EXCLUIDA, em: _hoje(), por: _usuario()},
+                                                 historico=_hist("exclusão"))
             except Exception as e:
-                st.error(f"Não consegui excluir: {e}")
+                st.error(f"Não consegui excluir: {_erro_curto(e)}")
                 return
             if not ok:
                 st.error("Não achei esse registro na planilha. Feche e abra de novo.")
@@ -2907,6 +3116,131 @@ def _dlg_excluir_juridico(aba: str, rid: str, o_que: str, volta: str):
             _flash("Excluído")
             st.session_state.tela = volta
             st.rerun()
+
+
+# ── Antes de gravar no Jurídico (auditoria de 04/11) ─────────────────────────
+
+# Quem é "Só Jurídico": tentativas de gravar (deem certo ou não) por janela de tempo. Passou de
+# qualquer uma, fica 15 min sem gravar. Contado ANTES de ler a planilha: assim nem tocar sem parar
+# gasta a cota de leitura do Google, que é uma só para o app inteiro (2ª auditoria de 04/11).
+LIMITES_TENTATIVAS = ((3, 60), (20, 10 * 60), (60, 24 * 3600))
+BLOQUEIO_TENTATIVAS = 15 * 60
+CONFIG_FRESCA_POR = 15   # segundos que a releitura da configuração vale, por sessão
+
+
+@st.cache_resource(show_spinner=False)
+def _tentativas() -> dict:
+    """{nome: {"t": [horários], "ate": bloqueado até}}, comum a todas as sessões e abas."""
+    return {}
+
+
+def _dentro_do_limite() -> bool:
+    if not _so_juridico() or chave_busca(_config().get(f"sem_limite:{_usuario()}", "")) == "sim":
+        return True   # acesso a tudo, ou pessoa de confiança marcada em Configurações
+    reg = _tentativas().setdefault(_usuario(), {"t": [], "ate": 0.0})
+    agora = time.monotonic()
+    if agora < reg["ate"]:
+        return False
+    reg["t"] = [t for t in reg["t"] if agora - t < LIMITES_TENTATIVAS[-1][1]] + [agora]
+    if any(sum(1 for t in reg["t"] if agora - t < janela) > maximo for maximo, janela in LIMITES_TENTATIVAS):
+        reg["ate"] = agora + BLOQUEIO_TENTATIVAS
+        return False
+    return True
+
+
+def _config_fresca() -> dict:
+    """A configuração lida AGORA da planilha (sem limpar a guardada de todo mundo), reaproveitada por
+    alguns segundos dentro da mesma sessão."""
+    memo = st.session_state.get("_cfg_fresca")
+    if memo and time.monotonic() - memo[0] < CONFIG_FRESCA_POR:
+        return memo[1]
+    cfg = _banco().get_config()
+    st.session_state["_cfg_fresca"] = (time.monotonic(), cfg)
+    return cfg
+
+
+def _sessao_ainda_vale():
+    """Antes de gravar no Jurídico, inclusive de dentro das janelinhas (que não passam pelo roteador):
+    relê a configuração e confere que a pessoa ainda é quem diz ser. Quem foi removida, perdeu o Gmail
+    ou o aparelho com a janelinha aberta não grava mais nada. None = não deu para ler agora."""
+    if _modo_demo():
+        return bool(_usuario())
+    try:
+        cfg = _config_fresca()
+    except Exception:
+        return None
+    return _sessao_ok(cfg)
+
+
+def _pode_gravar_juridico() -> bool:
+    if not _dentro_do_limite():
+        st.error("Muitas tentativas seguidas. Espere 15 minutos e tente de novo.")
+        return False
+    vale = _sessao_ainda_vale()
+    if vale is None:
+        st.error("A planilha do Google não respondeu agora. Tente de novo em instantes.")
+        return False
+    if not vale:
+        st.session_state.pop("_quem", None)
+        st.error("O seu acesso mudou. Feche e abra o app de novo.")
+        return False
+    return True
+
+
+def _excluidos_juridico(aba: str):
+    """Só o administrador: o que foi excluído no Jurídico, com 'Restaurar' (auditoria de 04/11: quem é
+    Só Jurídico pode excluir, então tem que dar para desfazer sem mexer na planilha)."""
+    if not _sou_admin():
+        return
+    todos = _juridico(True)
+    if not todos:
+        return
+    judicial = aba == ABA_JUDICIAL
+    excl = [x for x in (todos[0] if judicial else todos[1]) if x.get("excluida" if judicial else "excluido")]
+    if not excl:
+        return
+    with st.expander(f"Excluíd{'as' if judicial else 'os'} ({len(excl)})", icon=":material/restore_from_trash:"):
+        for x in excl:
+            with st.container(key=f"lx_jur_{x['id']}"):
+                st.markdown(f"<div class='lx-nome'>{_e(x['cliente'])}</div>"
+                            f"<div class='lx-meta'>{_e(' · '.join(v for v in (x['turma'], x['objeto']) if v))}</div>",
+                            unsafe_allow_html=True)
+                if st.button("Restaurar", key=f"lxj_{x['id']}", icon=":material/restore:"):
+                    if not _pode_gravar_juridico():
+                        return
+                    em, por = ("Excluída em", "Excluída por") if judicial else ("Excluído em", "Excluído por")
+                    try:
+                        ok = _banco().atualizar_registro(aba, x["id"], {"Situação": SITUACAO_ATIVA, em: "", por: ""},
+                                                         historico=_hist("restaurou"))
+                    except Exception as e:
+                        st.error(f"Não consegui restaurar: {_erro_curto(e)}")
+                        return
+                    if ok:
+                        _invalidar()
+                        _flash(f"{x['cliente']} restaurad{'a' if judicial else 'o'}")
+                        st.rerun()
+
+
+@st.cache_resource(show_spinner=False)
+def _codigos_pendentes() -> dict:
+    """{código curto: (código completo do aparelho, quando)} dos aparelhos novos que mostraram o código
+    na tela. O administrador digita o curto e o app grava o COMPLETO na liberação."""
+    return {}
+
+
+def _anotar_codigo(aparelho: str) -> str:
+    curto = codigo_aparelho(aparelho)
+    pend = _codigos_pendentes()
+    agora = time.monotonic()
+    for k in [k for k, (_, t) in pend.items() if agora - t > 24 * 3600]:
+        pend.pop(k, None)
+    pend[curto] = (aparelho, agora)
+    return curto
+
+
+def _hist(acao: str) -> dict:
+    """Quem, quando e o quê, para a aba _Historico_Juridico."""
+    return {"Quando": datetime.now(_FUSO).strftime("%d/%m/%Y %H:%M:%S"), "Quem": _usuario(), "Ação": acao}
 
 
 # ── Cobranças judiciais ───────────────────────────────────────────────────────
@@ -2934,7 +3268,7 @@ def _html_judicial(j: dict, hoje: date) -> str:
     if len(ps) > 1 and sit != CLI_QUITADO:
         estado += f" · {sum(1 for p in ps if p['paga'])} de {len(ps)} pagas"
     total = j["pago"] + j["falta"]
-    pct = int(round(100 * j["pago"] / total)) if total else 0
+    pct = _pct(j["pago"], total)
     local = " · ".join(x for x in (j["turma"], j["objeto"]) if x)
     return (
         f"<div class='cc {COR_JUD[sit]}'>"
@@ -2961,13 +3295,14 @@ def tela_judicial():
     if not achados:
         msg = "Nada encontrado com essa busca." if termo.strip() else "Nenhuma cobrança judicial cadastrada ainda."
         st.markdown(f"<div class='cx-vazio'>{msg}</div>", unsafe_allow_html=True)
-        return
-    st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'cobrança judicial', 'cobranças judiciais')} · "
-                f"{formatar_brl(sum(j['valor'] for j in achados))} cobrado</div>", unsafe_allow_html=True)
-    for j in ordenar_judiciais(achados):
-        if _cartao_toque(f"cc_j{j['id']}", f"tq_j{j['id']}", f"Abrir {j['cliente']}", _html_judicial(j, hoje)):
-            st.session_state.jud_id = j["id"]
-            _ir("jud_ficha")
+    else:
+        st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'cobrança judicial', 'cobranças judiciais')} · "
+                    f"{formatar_brl(sum(j['valor'] for j in achados))} cobrado</div>", unsafe_allow_html=True)
+        for j in ordenar_judiciais(achados):
+            if _cartao_toque(f"cc_j{j['id']}", f"tq_j{j['id']}", f"Abrir {j['cliente']}", _html_judicial(j, hoje)):
+                st.session_state.jud_id = j["id"]
+                _ir("jud_ficha")
+    _excluidos_juridico(ABA_JUDICIAL)
 
 
 def _abrir_form_judicial(j: dict | None):
@@ -3036,11 +3371,11 @@ def tela_jud_form():
         desde = st.date_input("Em cobrança no jurídico desde", format="DD/MM/YYYY", key="jf_desde")
         if not desde:
             erros.append("Falta a data em que foi para o jurídico.")
-        advogado = " ".join(st.text_input("Advogado responsável", key="jf_adv", max_chars=60).split())
+        advogado = texto_limpo(st.text_input("Advogado responsável", key="jf_adv", max_chars=60))
         if not advogado:
             usados = advogados_usados((_juridico() or ([], []))[0])
             if usados:
-                st.pills("Já usados", usados[:6], key="jf_adv_sug", on_change=_usar_advogado)
+                st.pills("Já usados", usados[:6], key="jf_adv_sug", on_change=_usar_advogado, format_func=_rotulo)
 
     valor_acordo, valores, datas, conf_ok = None, [], [], True
     with st.container(key="sec_jf3"):
@@ -3068,12 +3403,14 @@ def tela_jud_form():
             if anteriores and anteriores[0]["paga"]:
                 _info(f"Este acordo já está <b>pago</b> ({data_br(anteriores[0]['pago_em'])}).", "cx-ok")
         elif neg == NEG_PARCELADO:
-            n = st.number_input("Em quantas parcelas?", min_value=2, value=None, step=1, key="jf_n",
-                                placeholder="Ex.: 5")
+            n = st.number_input("Em quantas parcelas?", min_value=2, max_value=MAX_PARCELAS_ACORDO, value=None,
+                                step=1, key="jf_n", placeholder="Ex.: 5")
             primeira = st.date_input("1º vencimento", value=None, format="DD/MM/YYYY", key="jf_primeira",
                                      help="As outras vêm todo mês no mesmo dia. Dá para mudar cada uma embaixo.")
             if not n:
                 erros.append("Falta dizer em quantas parcelas.")
+            elif not 2 <= int(n) <= MAX_PARCELAS_ACORDO:   # conferido aqui também: o navegador pode mentir
+                erros.append(f"O acordo pode ter de 2 a {MAX_PARCELAS_ACORDO} parcelas.")
             elif not primeira:
                 erros.append("Falta o 1º vencimento.")
             else:
@@ -3130,7 +3467,7 @@ def tela_jud_form():
 
 
 def _salvar_judicial(atual: dict | None, campos: dict, neg: str, valores: list, datas: list):
-    if st.session_state.get("_salvando"):
+    if st.session_state.get("_salvando") or not _pode_gravar_juridico():
         return
     st.session_state["_salvando"] = True
     try:
@@ -3141,17 +3478,23 @@ def _salvar_judicial(atual: dict | None, campos: dict, neg: str, valores: list, 
             _invalidar()
             fresco = _judicial(atual["id"]) or atual
             anteriores = fresco["parcelas"] if fresco["negociacao"] == neg else []
+        if len(valores) > MAX_PARCELAS_ACORDO:
+            st.error(f"O acordo pode ter no máximo {MAX_PARCELAS_ACORDO} parcelas.")
+            return
         campos["Acordo"] = acordo_para_texto(parcelas_do_acordo(valores, datas, anteriores)) if neg else ""
         if atual:
             jid = atual["id"]
-            if not _banco().atualizar_registro(ABA_JUDICIAL, jid, campos):
+            if not _banco().atualizar_registro(ABA_JUDICIAL, jid, {**campos, "Alterada por": _usuario(),
+                                                                   "Alterada em": _hoje()},
+                                               historico=_hist("edição")):
                 st.error("Não achei essa cobrança judicial na planilha. Volte e abra de novo.")
                 return
         else:
             jid = _banco().criar_registro(ABA_JUDICIAL, {**campos, "Cadastrada por": _usuario(),
-                                                         "Criada em": _hoje(), "Situação": SITUACAO_ATIVA})
+                                                         "Criada em": _hoje(), "Situação": SITUACAO_ATIVA},
+                                          historico=_hist("cadastro"))
     except Exception as e:
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return
     finally:
         st.session_state["_salvando"] = False
@@ -3209,6 +3552,8 @@ def _parcela_do_acordo(jid: str, n: int):
 def _gravar_acordo(jid: str, n: int, paga: bool, quando: date | None = None) -> bool:
     """Marca ou desmarca UMA parcela do acordo. Relê a planilha na hora: se outra pessoa mexeu
     em outra parcela do mesmo acordo há pouco, a marca dela não se perde."""
+    if not _pode_gravar_juridico():
+        return False
     _invalidar()
     j, p = _parcela_do_acordo(jid, n)
     if not p:
@@ -3216,9 +3561,11 @@ def _gravar_acordo(jid: str, n: int, paga: bool, quando: date | None = None) -> 
         return False
     novas = marcar_parcela_acordo(j["parcelas"], n, paga, quando, _usuario())
     try:
-        ok = _banco().atualizar_registro(ABA_JUDICIAL, jid, {"Acordo": acordo_para_texto(novas)})
+        ok = _banco().atualizar_registro(
+            ABA_JUDICIAL, jid, {"Acordo": acordo_para_texto(novas), "Alterada por": _usuario(), "Alterada em": _hoje()},
+            historico=_hist(f"{'marcou paga' if paga else 'desfez pagamento'}: {p['rotulo']}"))
     except Exception as e:
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return False
     if not ok:
         st.error("Não achei essa cobrança judicial na planilha.")
@@ -3279,7 +3626,7 @@ def tela_jud_ficha():
     acordo = ""
     if ps:
         total = j["pago"] + j["falta"]
-        pct = int(round(100 * j["pago"] / total)) if total else 0
+        pct = _pct(j["pago"], total)
         titulo = (f"Acordo à vista de <b>{formatar_brl(total)}</b>" if j["negociacao"] == NEG_A_VISTA
                   else f"Acordo em <b>{len(ps)} parcelas</b>, somando <b>{formatar_brl(total)}</b>")
         acordo = (f"<div class='fc-acordo'>{titulo}</div><div class='pg'><i style='width:{pct}%'></i></div>"
@@ -3342,13 +3689,14 @@ def tela_protestos():
     if not achados:
         msg = "Nada encontrado com essa busca." if termo.strip() else "Nenhum protesto cadastrado ainda."
         st.markdown(f"<div class='cx-vazio'>{msg}</div>", unsafe_allow_html=True)
-        return
-    abertos = sum(1 for p in achados if not p["pago"])
-    st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'protesto', 'protestos')} · {abertos} em aberto</div>",
-                unsafe_allow_html=True)
-    for p in ordenar_protestos(achados):
-        if _cartao_toque(f"cc_p{p['id']}", f"tq_p{p['id']}", f"Abrir {p['cliente']}", _html_protesto(p)):
-            _abrir_form_protesto(p)
+    else:
+        abertos = sum(1 for p in achados if not p["pago"])
+        st.markdown(f"<div class='rl-cont'>{_plural(len(achados), 'protesto', 'protestos')} · {abertos} em aberto"
+                    "</div>", unsafe_allow_html=True)
+        for p in ordenar_protestos(achados):
+            if _cartao_toque(f"cc_p{p['id']}", f"tq_p{p['id']}", f"Abrir {p['cliente']}", _html_protesto(p)):
+                _abrir_form_protesto(p)
+    _excluidos_juridico(ABA_PROTESTOS)
 
 
 def _abrir_form_protesto(p: dict | None):
@@ -3414,19 +3762,21 @@ def tela_prot_form():
 
 
 def _salvar_protesto(atual: dict | None, campos: dict):
-    if st.session_state.get("_salvando"):
+    if st.session_state.get("_salvando") or not _pode_gravar_juridico():
         return
     st.session_state["_salvando"] = True
     try:
         if atual:
-            if not _banco().atualizar_registro(ABA_PROTESTOS, atual["id"], campos):
+            if not _banco().atualizar_registro(ABA_PROTESTOS, atual["id"], {**campos, "Alterado por": _usuario(),
+                                                                            "Alterado em": _hoje()},
+                                               historico=_hist("edição")):
                 st.error("Não achei esse protesto na planilha. Volte e abra de novo.")
                 return
         else:
             _banco().criar_registro(ABA_PROTESTOS, {**campos, "Cadastrado por": _usuario(), "Criado em": _hoje(),
-                                                    "Situação": SITUACAO_ATIVA})
+                                                    "Situação": SITUACAO_ATIVA}, historico=_hist("cadastro"))
     except Exception as e:
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return
     finally:
         st.session_state["_salvando"] = False
@@ -3449,12 +3799,14 @@ def _usuario_do_bot(_token: str) -> str:
 
 
 def _salvar_config(chave: str, valor: str) -> bool:
+    if _so_juridico() or not _sessao_ok():
+        return False   # (callbacks das Notificações rodam antes do roteador)
     try:
         _banco().save_config(chave, valor)
         _ler_config.clear()
         return True
     except Exception as e:
-        st.error(f"Não consegui salvar: {e}")
+        st.error(f"Não consegui salvar: {_erro_curto(e)}")
         return False
 
 
@@ -3503,7 +3855,7 @@ def tela_notificacoes():
                 bot = _usuario_do_bot(token)
             except Exception as e:
                 bot = ""
-                st.error(f"Não consegui falar com o bot: {e}")
+                st.error(f"Não consegui falar com o bot: {_erro_curto(e)}")
             if bot:
                 codigo = st.session_state.setdefault("_nt_codigo", os.urandom(4).hex())
                 _info("Para receber os avisos neste celular:<br><b>1.</b> Abra o bot no Telegram"
@@ -3516,7 +3868,7 @@ def tela_notificacoes():
                         chat = avisos_telegram.achar_chat(token, codigo)
                     except Exception as e:
                         chat = None
-                        st.error(f"Não consegui falar com o Telegram: {e}")
+                        st.error(f"Não consegui falar com o Telegram: {_erro_curto(e)}")
                     if chat and _salvar_config(f"telegram:{eu}", chat):
                         _salvar_config(f"avisos:{eu}", "sim")
                         st.session_state.pop("_nt_codigo", None)
@@ -3601,8 +3953,8 @@ def _voltar_do_celular():
     intercepta o "voltar" do navegador e clica nele (mesma solução do boleto).
     """
     tela = st.session_state.tela
-    if tela not in _TELA_PAI:
-        return
+    if tela not in _TELA_PAI or (tela == "juridico" and _so_juridico()):
+        return   # tela de partida: a seta do celular sai do app
     pai = _TELA_PAI[tela] or st.session_state.get("cob_volta", "relatorio")
     if tela == "jud_form" and st.session_state.get("jud_edit"):
         pai = "jud_ficha"   # editando: volta para a ficha que estava aberta
@@ -3797,9 +4149,15 @@ telas = {
 }
 if st.session_state.tela not in telas:
     st.session_state.tela = "inicio"
+# Telas que quem tem acesso SÓ AO JURÍDICO pode abrir (lista do que PODE: tela nova fica fechada
+# para essa pessoa até alguém pôr aqui de propósito)
+TELAS_SO_JURIDICO = {"juridico", "judicial", "jud_form", "jud_ficha", "protestos", "prot_form"}
+
 st.session_state["_avisou_fora"] = False   # o aviso "a planilha não respondeu" aparece uma vez por tela
 try:
     if _identificado():
+        if _so_juridico() and st.session_state.tela not in TELAS_SO_JURIDICO:
+            st.session_state.tela = "juridico"
         telas[st.session_state.tela]()
         _voltar_do_celular()
         _campos_do_celular()

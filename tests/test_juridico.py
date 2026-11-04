@@ -2,6 +2,7 @@
 Jurídico (pedido 03/11): cobranças judiciais e protestos, e a leitura da planilha com prazo e
 nova tentativa (a lentidão / tela pela metade relatada no mesmo dia).
 """
+import json
 import os
 import sys
 import tempfile
@@ -144,6 +145,85 @@ class Protestos(unittest.TestCase):
         self.assertEqual((p["pago"], p["pago_em"], p["marcado_por"]), (False, None, ""))
 
 
+class AcessoSoJuridico(unittest.TestCase):
+    """Pedido 04/11: pessoa com acesso só ao Jurídico não pode chegar em mais nada."""
+    CFG = {"pessoas": "Pedro, Ana, Jur", "admin": "Pedro", "acesso:Jur": "juridico",
+           "telegram:Pedro": "1", "telegram:Ana": "2", "telegram:Jur": "3", "telegram:Removida": "4"}
+
+    def test_quem_e_restrito(self):
+        self.assertTrue(n.so_juridico(self.CFG, "Jur"))
+        self.assertFalse(n.so_juridico(self.CFG, "Ana"))
+        self.assertFalse(n.so_juridico(self.CFG, ""))
+        self.assertEqual(n.pessoas_restritas(self.CFG), ["Jur"])
+        self.assertTrue(n.so_juridico({**self.CFG, "acesso:Jur": " JURÍDICO "}, "Jur"))   # escrito à mão na planilha
+
+    def test_administrador_nunca_fica_restrito(self):
+        self.assertFalse(n.so_juridico({**self.CFG, "acesso:Pedro": "juridico"}, "Pedro"))
+
+    def test_fecha_por_padrao(self):
+        # auditoria 04/11: só vazio ou "tudo" dá acesso a tudo; qualquer outra coisa restringe
+        self.assertTrue(n.so_juridico({**self.CFG, "acesso:Ana": "outra coisa"}, "Ana"))
+        self.assertTrue(n.so_juridico({**self.CFG, "acesso:Ana": "só jurídico"}, "Ana"))
+        self.assertFalse(n.so_juridico({**self.CFG, "acesso:Ana": "Tudo"}, "Ana"))
+        # quem saiu da lista de pessoas (removida com o app aberto) não tem acesso a tudo
+        self.assertTrue(n.so_juridico(self.CFG, "Removida"))
+        self.assertTrue(n.so_juridico({**self.CFG, "pessoas": "Pedro, Ana"}, "Jur"))
+
+    def test_telegram_nao_vai_para_restrito_nem_para_removido(self):
+        self.assertEqual(n.destinatarios(self.CFG), [("Ana", "2"), ("Pedro", "1")])
+
+    def test_trava_por_aparelho_com_restrito_libera_por_codigo(self):
+        sem_restrito = {k: v for k, v in self.CFG.items() if k != "acesso:Jur"}
+        self.assertEqual(n.nomes_livres(sem_restrito), ["Pedro", "Ana", "Jur"])   # como sempre foi
+        aparelho = "ab12cd" + "0" * 18
+        self.assertEqual(n.nomes_livres(self.CFG, aparelho), [])                  # ninguém pega nome alheio
+        # liberação antiga ("sim") não vale mais para qualquer aparelho
+        self.assertEqual(n.nomes_livres({**self.CFG, "liberado:Ana": "sim"}, aparelho), [])
+        # liberada para ESTE aparelho (código completo): só ele vê o nome
+        cfg = {**self.CFG, "liberado:Ana": aparelho.upper()}
+        self.assertEqual(n.nomes_livres(cfg, aparelho), ["Ana"])
+        self.assertEqual(n.nomes_livres(cfg, "ffffff" + "0" * 18), [])
+        self.assertEqual(n.nomes_livres(cfg, ""), [])
+        # as 6 letras curtas não bastam (dava para fabricar um aparelho começando com elas)
+        self.assertEqual(n.nomes_livres({**self.CFG, "liberado:Ana": "AB12CD"}, aparelho), [])
+        self.assertEqual(n.nomes_livres(cfg, "ab12cd" + "1" * 18), [])
+
+    def test_liberacao_por_codigo_continua_depois_que_a_restrita_sai(self):
+        cfg = {"pessoas": "Pedro, Ana", "admin": "Pedro", "liberacao_por_codigo": "sim"}
+        self.assertTrue(n.liberacao_por_codigo(cfg))
+        self.assertEqual(n.nomes_livres(cfg, "ab12cd" + "0" * 18), [])
+        self.assertFalse(n.liberacao_por_codigo({"pessoas": "Pedro, Ana"}))
+
+    def test_demonstracao_fora_da_lista_nao_restringe(self):
+        self.assertFalse(n.so_juridico({"pessoas": ""}, "Visitante", fora_da_lista_restringe=False))
+        self.assertTrue(n.so_juridico({"pessoas": "", "acesso:V": "juridico"}, "V", fora_da_lista_restringe=False))
+
+
+class Blindagem(unittest.TestCase):
+    """Achados da auditoria de 04/11: entrada que derrubava a tela ou virava imagem de outro site."""
+
+    def test_valor_absurdo_vira_ilegivel(self):
+        self.assertIsNone(n.valor_para_float("2" + "0" * 306))
+        self.assertIsNone(n.valor_para_float("99999999999"))
+        self.assertEqual(n.valor_para_float("9.999.999.999,00"), 9999999999.0)
+
+    def test_acordo_com_valor_absurdo_nao_derruba_as_contas(self):
+        j = n.montar_judiciais([linha_jud(neg="À vista", acordo="1 | " + "2" + "0" * 306 + " | 01/10/2026 | Paga")],
+                               HOJE)[0]
+        self.assertEqual(j["pago"], 0.0)
+
+    def test_acordo_gigante_e_cortado(self):
+        txt = "\n".join(f"{i} | 1,00 | 01/01/2027" for i in range(1, 5000))
+        self.assertEqual(len(n.acordo_do_texto(txt)), n.MAX_PARCELAS_ACORDO)
+
+    def test_texto_limpo_uma_linha_sem_html(self):
+        self.assertEqual(n.texto_limpo("FULANO\n\n<img src=x>\x07 B"), "FULANO img src=x B")
+        # sinais de nome de verdade ficam (a proteção contra Markdown é na hora de mostrar)
+        self.assertEqual(n.texto_limpo("JOSÉ (FILHO) & CIA_LTDA. D'ÁVILA / 2"), "JOSÉ (FILHO) & CIA_LTDA. D'ÁVILA / 2")
+        j = n.montar_judiciais([linha_jud(cliente="A\n\nB", adv="C\r\nD")], HOJE)[0]
+        self.assertEqual((j["cliente"], j["advogado"]), ("A B", "C D"))
+
+
 class LocalJuridico(unittest.TestCase):
     """O arquivo de teste (Local) grava e relê as abas novas igual à planilha."""
 
@@ -166,6 +246,17 @@ class LocalJuridico(unittest.TestCase):
         self.assertEqual(d["judiciais"][0]["Advogado"], "DR. Z")
         self.assertEqual(d["protestos"][0]["Pago"], "Sim")
         self.assertEqual(d["protestos"][0]["ID"], pid)
+
+    def test_historico_guarda_antes_e_depois(self):
+        h = {"Quando": "04/11/2026 10:00:00", "Quem": "Jur", "Ação": "cadastro"}
+        jid = self.banco.criar_registro(dados.ABA_JUDICIAL, {"Cliente": "X", "Advogado": "A"}, historico=h)
+        self.banco.atualizar_registro(dados.ABA_JUDICIAL, jid, {"Advogado": "B"}, historico={**h, "Ação": "edição"})
+        self.banco.atualizar_registro(dados.ABA_JUDICIAL, jid, {"Cliente": "Y"})   # sem histórico: não registra
+        hist = self.banco.historico()
+        self.assertEqual([x["Ação"] for x in hist], ["cadastro", "edição"])
+        self.assertEqual(json.loads(hist[1]["Antes"]), {"Advogado": "A"})
+        self.assertEqual(json.loads(hist[1]["Depois"]), {"Advogado": "B"})
+        self.assertEqual((hist[1]["Quem"], hist[1]["Aba"], hist[1]["ID"]), ("Jur", dados.ABA_JUDICIAL, jid))
 
     def test_arquivo_antigo_sem_as_abas_novas(self):
         d = self.banco.carregar()

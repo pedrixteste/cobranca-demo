@@ -67,6 +67,14 @@ def salvar_gmail(page, pessoa, email):
     esperar(page)
 
 
+
+def acesso_tudo(page):
+    """Desde 04/11 'Adicionar pessoa' exige escolher o acesso: marca 'Tudo' (se ainda não estiver marcado)."""
+    # tocar em "Só Jurídico" e depois em "Tudo" deixa "Tudo" marcado, esteja como estiver antes
+    for opcao in ("Só Jurídico", "Tudo"):
+        page.locator(".st-key-cf_novo_acesso button", has_text=opcao).first.click()
+        esperar(page, 900)
+
 with sync_playwright() as p:
     b = p.chromium.launch()
     dev = p.devices["Pixel 5"]
@@ -96,11 +104,11 @@ with sync_playwright() as p:
     confere("campo de Gmail aparece em minúscula e abre teclado de e-mail",
             campo.evaluate("e => getComputedStyle(e).textTransform") == "none"
             and campo.get_attribute("inputmode") == "email")
-    por(A, "Nome", "Gabi"); A.locator("input[aria-label='Gmail']").first.fill(PEDRO); botao(A, "Adicionar")
+    por(A, "Nome", "Gabi"); A.locator("input[aria-label='Gmail']").first.fill(PEDRO); acesso_tudo(A); botao(A, "Adicionar")
     confere("Gmail que já é de outra pessoa é recusado", tem(A, "já é de Pedro"))
-    A.locator("input[aria-label='Gmail']").first.fill(GABI); botao(A, "Adicionar")
+    A.locator("input[aria-label='Gmail']").first.fill(GABI); acesso_tudo(A); botao(A, "Adicionar")
     confere("Gabi adicionada com Gmail", A.locator("input[aria-label='Gmail de Gabi']").first.input_value() == GABI)
-    por(A, "Nome", "Ana"); A.locator("input[aria-label='Gmail']").first.fill(""); botao(A, "Adicionar")
+    por(A, "Nome", "Ana"); A.locator("input[aria-label='Gmail']").first.fill(""); acesso_tudo(A); botao(A, "Adicionar")
     confere("Ana adicionada sem Gmail (antes de ligar pode)", A.locator("input[aria-label='Gmail de Ana']").count() == 1)
 
     # 3. Teste com o Gmail errado e depois com o certo
@@ -120,7 +128,7 @@ with sync_playwright() as p:
     confere("com a entrada ligada some 'Liberar novo aparelho'", not any("Liberar novo aparelho" in x for x in botoes(A)))
     confere("o Gmail do administrador fica travado",
             A.locator("input[aria-label='Gmail de Pedro']").count() == 0 and tem(A, "desligue a entrada com Google"))
-    por(A, "Nome", "Bia"); botao(A, "Adicionar")
+    por(A, "Nome", "Bia"); acesso_tudo(A); botao(A, "Adicionar")
     confere("com a entrada ligada, pessoa nova precisa de Gmail", tem(A, "precisa de um Gmail"))
 
     # 4. Gabi em qualquer aparelho

@@ -403,3 +403,5 @@ header[data-testid="stHeader"] { display: none; }
 .hm-quem b { color: var(--tinta); font-weight: 600; }
 .st-key-btn_config button { color: var(--apoio); }
 .cf-meta  { font-size: .8rem; color: var(--apoio); margin-top: -2px; }
+/* Código do aparelho novo (liberação por código, pedido 04/11) */
+.cf-codigo { font-family: var(--mono); letter-spacing: .12em; font-size: 1.05em; }
