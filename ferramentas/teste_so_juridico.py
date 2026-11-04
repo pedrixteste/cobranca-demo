@@ -66,7 +66,7 @@ def entrar(page, email):
 # Nomes que só existem nas COBRANÇAS do exemplo: nenhum pode aparecer para a Jurista
 CLIENTES_COBRANCA = ["Maria José", "Carlos Pereira", "Ana Fernandes", "Roberto Almeida", "Fernanda Costa",
                      "Juliana Martins", "PADARIA BOM GOSTO"]
-PROIBIDOS = ["Pix, cartão, híbrido ou permuta", "Relatório de cobranças", "Configurações", "Notificações", "Feriados",
+PROIBIDOS = ["Pix, cartão, híbrido ou permuta", "Relatório de cobranças", "Configurações", "Feriados",
              "Cobranças excluídas", "Tamanho do texto"]
 
 
@@ -121,8 +121,8 @@ try:
         cfg = json.loads(arquivo.read_text(encoding="utf-8"))["config"]
         confere("gravou acesso:Jurista = juridico", cfg.get("acesso:Jurista") == "juridico", str(cfg.get("acesso:Jurista")))
         linha = P.locator("[class*='st-key-sec_cf_']", has_text="Jurista").first.inner_text()
-        confere("Configurações mostra 'Só Jurídico' e que ela não recebe Telegram",
-                "Só Jurídico" in linha and "Não recebe aviso no Telegram" in linha, linha.replace("\n", " | "))
+        confere("Configurações mostra 'Só Jurídico' e a opção Sem limite",
+                "Só Jurídico" in linha and "Sem limite de gravações" in linha, linha.replace("\n", " | "))
         confere("o administrador não tem a opção de se restringir",
                 P.locator("[class*='st-key-cf_acesso_']").count() == 2)   # Ana e Jurista, não o Pedro
 
@@ -136,6 +136,19 @@ try:
         confere("mostra 'Usando como Jurista · sair'", "Usando como Jurista" in t)
         nada_de_cobranca(J, "tela inicial da Jurista")
         J.screenshot(path=str(OUT / "sojur_1_inicio.png"), full_page=True)
+
+        # Notificações dela: só o próprio Telegram, nada das cobranças nem de quem recebe
+        botao(J, "Notificações")
+        t = corpo(J)
+        confere("Notificações dela: só os avisos do Jurídico", "Avisos do Jurídico no Telegram" in t
+                and "O que avisar" not in t and "Quem recebe" not in t and "Ana" not in t, t[:200].replace("\n", " | "))
+        nada_de_cobranca(J, "Notificações da Jurista")
+        botao(J, "Voltar")
+        confere("Voltar das Notificações volta ao Jurídico", J.locator(".st-key-hm_jud").count() == 1)
+        botao(P, "Voltar"); botao(P, "Notificações")
+        confere("Notificações do Pedro: opção do Jurídico em 'O que avisar'",
+                "Jurídico: parcelas dos acordos" in corpo(P) and "Quem recebe" in corpo(P))
+        botao(P, "Voltar"); botao(P, "Configurações")
 
         # usa o Jurídico normalmente
         J.locator(".st-key-tq_jud button").first.click(force=True); esperar(J)

@@ -14,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import dados  # noqa: E402
+import notifier  # noqa: E402
 import nucleo as n  # noqa: E402
 
 HOJE = date(2026, 11, 3)
@@ -320,6 +321,74 @@ class ClientePaciente(unittest.TestCase):
         _, kwargs = sa.call_args
         self.assertEqual(kwargs["http_client"].__mro__[1].__name__, "HTTPClient")
         sa.return_value.set_timeout.assert_called_once_with(dados.TEMPO_LIMITE)
+
+
+class AvisosJuridico(unittest.TestCase):
+    """Pedido 04/11: avisos do Jurídico no Telegram, no padrão das cobranças."""
+    # HOJE = terça 03/11/2026; domingo da semana = 08/11
+    TXT = ("1 | 600,00 | 01/09/2026 | Paga | 01/09/2026 | Ana\n2 | 600,00 | 30/10/2026\n"
+           "3 | 600,00 | 03/11/2026\n4 | 600,00 | 04/11/2026\n5 | 600,00 | 06/11/2026\n6 | 600,00 | 30/11/2026")
+    CFG = {"pessoas": "Pedro, Ana, Jur", "admin": "Pedro", "acesso:Jur": "juridico",
+           "telegram:Pedro": "1", "telegram:Ana": "2", "telegram:Jur": "3", "avisos:Ana": "nao",
+           "telegram:Removida": "9"}
+
+    def judiciais(self):
+        return n.montar_judiciais([linha_jud(neg="Parcelado", acordo=self.TXT, cliente="LOJA ACORDO"),
+                                   linha_jud("j2", cliente="SEM ACORDO")], HOJE)
+
+    def test_separa_como_as_cobrancas(self):
+        a = n.avisos_juridico(self.judiciais(), HOJE)
+        self.assertEqual([p["n"] for p, _ in a["atrasadas"]], [2])
+        self.assertEqual([p["n"] for p, _ in a["hoje"]], [3])
+        self.assertEqual([p["n"] for p, _ in a["amanha"]], [4])
+        self.assertEqual([p["n"] for p, _ in a["semana"]], [5])   # a 6ª é depois do domingo
+
+    def test_quem_recebe(self):
+        self.assertEqual(n.destinatarios(self.CFG), [("Pedro", "1")])                       # cobranças
+        self.assertEqual(n.destinatarios_juridico(self.CFG), [("Jur", "3"), ("Pedro", "1")])  # Jurídico
+
+    def test_mensagem_diaria(self):
+        txt = notifier.montar_juridico(self.judiciais(), [], HOJE)
+        self.assertIn("⚖️ <b>Jurídico · terça, 03/11/2026</b>", txt)
+        self.assertIn("🔴 <b>Acordos atrasados</b> (1 · R$ 600,00)", txt)
+        self.assertIn("• <b>LOJA ACORDO</b> (L340 · Cheque) · R$ 600,00 · parcela 2 de 6 · 30/10 (4 dias de atraso)", txt)
+        self.assertIn("🚨 <b>Vence hoje</b>", txt)
+        self.assertIn("⚠️ <b>Vence amanhã</b>", txt)
+        self.assertNotIn("Resto da semana", txt)
+
+    def test_sem_nada_no_dia_nao_manda(self):
+        sem = n.montar_judiciais([linha_jud(neg="À vista", acordo="1 | 100,00 | 30/12/2026")], HOJE)
+        self.assertIsNone(notifier.montar_juridico(sem, [], HOJE))
+        self.assertIsNone(notifier.montar_juridico([], [], HOJE, semanal=True))
+
+    def test_semanal_tem_o_geral(self):
+        prot = n.montar_protestos([{"ID": "p", "Cliente": "X"}, {"ID": "q", "Cliente": "Y", "Pago": "Sim"}])
+        txt = notifier.montar_juridico(self.judiciais(), prot, HOJE, semanal=True)
+        self.assertIn("Jurídico da semana · 03/11 a 08/11/2026", txt)
+        self.assertIn("📅 <b>Resto da semana</b>", txt)
+        self.assertIn("Na justiça: 2 (1 sem acordo)", txt)
+        self.assertIn("Acordos: recebido R$ 600,00 · falta R$ 3.000,00 · atrasado R$ 600,00", txt)
+        self.assertIn("Protestos em aberto: 1", txt)
+
+    def test_desligado_na_tela_notificacoes(self):
+        self.assertIsNone(notifier.montar_juridico(self.judiciais(), [], HOJE, opcoes={"avisar_juridico": False}))
+
+    def test_cada_um_recebe_o_que_pode(self):
+        msgs = notifier.mensagens_por_chat(self.CFG, "COBRANÇAS", "JURÍDICO", ["7"])
+        self.assertEqual(msgs["1"], "COBRANÇAS\n\nJURÍDICO")   # Pedro: tudo
+        self.assertEqual(msgs["3"], "JURÍDICO")                # Jur: nunca as cobranças
+        self.assertEqual(msgs["7"], "COBRANÇAS\n\nJURÍDICO")   # TELEGRAM_CHAT_IDS antigo = tudo
+        self.assertNotIn("2", msgs)                             # Ana pausou
+        self.assertNotIn("9", msgs)                             # removida
+        so_cob = notifier.mensagens_por_chat(self.CFG, "COBRANÇAS", None)
+        self.assertEqual(set(so_cob), {"1"})                    # sem Jurídico no dia: a Jur não recebe nada
+        self.assertEqual(notifier.mensagens_por_chat(self.CFG, None, None), {})
+
+    def test_nome_com_html_no_telegram(self):
+        j = n.montar_judiciais([linha_jud(neg="À vista", acordo="1 | 100,00 | 03/11/2026", cliente="<b>X</b> & Y")], HOJE)
+        txt = notifier.montar_juridico(j, [], HOJE)
+        self.assertIn("b X /b &amp; Y", txt)
+        self.assertNotIn("<b>X</b>", txt)
 
 
 if __name__ == "__main__":

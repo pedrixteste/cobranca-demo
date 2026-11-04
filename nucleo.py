@@ -948,6 +948,7 @@ OPCOES_AVISO = {
     "avisar_hoje": "O que é para cobrar hoje",
     "avisar_amanha": "O que é para cobrar amanhã",
     "resumo_semanal": "Resumo da semana (toda segunda)",
+    "avisar_juridico": "Jurídico: parcelas dos acordos (atrasadas, de hoje e de amanhã)",
 }
 
 
@@ -973,6 +974,15 @@ def destinatarios(config: dict) -> list[tuple]:
             if _ligado(config, f"avisos:{nome}"):
                 saida.append((nome, _txt(valor)))
     return sorted(saida)
+
+
+def destinatarios_juridico(config: dict) -> list[tuple]:
+    """[(nome, chat_id)] de quem recebe os avisos do JURÍDICO (pedido 04/11): todo mundo da lista de
+    pessoas que conectou o Telegram e não pausou, inclusive quem é Só Jurídico."""
+    pessoas = pessoas_da_config(config)
+    return sorted((nome, _txt(valor)) for chave, valor in config.items()
+                  if chave.startswith("telegram:") and _txt(valor)
+                  and (nome := chave[len("telegram:"):]) in pessoas and _ligado(config, f"avisos:{nome}"))
 
 
 def avisos(cobs: list[dict], hoje: date) -> dict:
@@ -1225,6 +1235,26 @@ def advogados_usados(judiciais: list[dict]) -> list[str]:
     return [nome for nome, _ in sorted(contagem.values(), key=lambda x: (-x[1], chave_busca(x[0])))]
 
 
+def avisos_juridico(judiciais: list[dict], hoje: date) -> dict:
+    """Parcelas de acordo ainda não pagas, no mesmo jeito dos avisos das cobranças: atrasadas, hoje,
+    amanhã e o resto da semana. Cada item é (parcela, cobrança judicial)."""
+    amanha = hoje + timedelta(days=1)
+    domingo = inicio_semana(hoje) + timedelta(days=6)
+    r = {"atrasadas": [], "hoje": [], "amanha": [], "semana": []}
+    for j in judiciais:
+        if j.get("excluida"):
+            continue
+        for p in j["parcelas"]:
+            d = p.get("vencimento")
+            if p.get("paga") or not d or d > domingo:
+                continue
+            chave = ("atrasadas" if d < hoje else "hoje" if d == hoje else "amanha" if d == amanha else "semana")
+            r[chave].append((p, j))
+    for itens in r.values():
+        itens.sort(key=lambda it: (it[0]["vencimento"], chave_busca(it[1]["cliente"])))
+    return r
+
+
 def resumo_juridico(judiciais: list[dict], protestos: list[dict]) -> dict:
     return {
         "n_judiciais": len(judiciais),
@@ -1233,4 +1263,7 @@ def resumo_juridico(judiciais: list[dict], protestos: list[dict]) -> dict:
         "cobrado": sum(j["valor"] for j in judiciais),
         "n_protestos": len(protestos),
         "n_protestos_abertos": sum(1 for p in protestos if not p["pago"]),
+        "acordo_pago": sum(j["pago"] for j in judiciais),
+        "acordo_falta": sum(j["falta"] for j in judiciais),
+        "acordo_atrasado": sum(j["atrasado"] for j in judiciais),
     }

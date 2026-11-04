@@ -50,7 +50,7 @@ import avisos_telegram
 import feriados
 import notifier
 from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_AVISO, ROTULO_CLI, chave_busca,
-                    administrador, aparelhos_por_pessoa, destinatarios, nome_do_aparelho, nomes_livres,
+                    administrador, aparelhos_por_pessoa, destinatarios, destinatarios_juridico, nome_do_aparelho, nomes_livres,
                     cidade_da_turma, local_da_cobranca, opcoes_avisos, pessoas_da_config,
                     formatar_telefone, link_ligar, link_whatsapp, telefone_do_cliente, telefone_valido,
                     dono_do_email, email_valido, emails_por_pessoa, login_google_ligado, normalizar_email,
@@ -1107,8 +1107,8 @@ def tela_config():
         else:
             estado = "<span class='sit c-neutro'>Ainda não entrou</span>"
         restrita = so_juridico(cfg, p)
-        telegram = ("Não recebe aviso no Telegram (só Jurídico)" if restrita
-                    else "Telegram conectado" if cfg.get(f"telegram:{p}") else "Sem Telegram")
+        telegram = ("Telegram conectado" + (" (só avisos do Jurídico)" if restrita else "")
+                    if cfg.get(f"telegram:{p}") else "Sem Telegram")
         with st.container(key=f"sec_cf_{i}"):
             st.markdown(f"<div class='nt-pessoa'><span>{_e(p)}{' · administrador' if p == adm else ''}</span>{estado}</div>"
                         f"<div class='cf-meta'>{telegram}</div>", unsafe_allow_html=True)
@@ -3057,6 +3057,8 @@ def tela_juridico():
                       "Protestos", "Cheque, promissória ou ficha protestados", chips_prot):
         _ir("protestos")
     if restrito:
+        if st.button("Notificações", key="btn_notificacoes", icon=":material/notifications:", type="tertiary"):
+            _ir("notificacoes")
         _rodape_quem()
 
 
@@ -3799,8 +3801,10 @@ def _usuario_do_bot(_token: str) -> str:
 
 
 def _salvar_config(chave: str, valor: str) -> bool:
-    if _so_juridico() or not _sessao_ok():
-        return False   # (callbacks das Notificações rodam antes do roteador)
+    if not _sessao_ok():
+        return False
+    if _so_juridico() and chave not in (f"telegram:{_usuario()}", f"avisos:{_usuario()}"):
+        return False   # quem é Só Jurídico só mexe no próprio Telegram (callbacks rodam antes do roteador)   # (callbacks das Notificações rodam antes do roteador)
     try:
         _banco().save_config(chave, valor)
         _ler_config.clear()
@@ -3814,9 +3818,18 @@ def _mudar_opcao_aviso(chave: str, widget: str):
     _salvar_config(chave, "sim" if st.session_state.get(widget) else "nao")
 
 
+def _previa_juridico(semanal: bool = False) -> str | None:
+    jur = _juridico()
+    if not jur:
+        return None
+    return notifier.montar_juridico(jur[0], jur[1], _hoje(), semanal, opcoes_avisos(_config()))
+
+
 def tela_notificacoes():
-    _cabecalho("Notificações", voltar_para="inicio",
-               subtitulo="Avisos de cobrança no Telegram, todo dia às 7h30")
+    restrito = _so_juridico()
+    _cabecalho("Notificações", voltar_para="juridico" if restrito else "inicio",
+               subtitulo=("Avisos do Jurídico no Telegram, todo dia às 7h30" if restrito
+                          else "Avisos de cobrança e do Jurídico no Telegram, todo dia às 7h30"))
     eu = _usuario()
     cfg = _config()
     token = _token_bot()
@@ -3837,11 +3850,14 @@ def tela_notificacoes():
             if st.button("Mandar um aviso de teste agora", key="nt_teste", icon=":material/send:",
                          use_container_width=True):
                 try:
-                    cobs = _cobrancas() or []
-                    previa = notifier.montar_diario(cobs, _hoje(), opcoes_avisos(cfg))
+                    partes = []
+                    if not restrito:
+                        partes.append(notifier.montar_diario(_cobrancas() or [], _hoje(), opcoes_avisos(cfg)))
+                    partes.append(_previa_juridico())
+                    previa = "\n\n".join(x for x in partes if x)
                     avisos_telegram.enviar(token, meu_chat,
-                                           "✅ <b>Teste dos avisos de cobrança</b>\nÉ assim que chega, todo dia às 7h30.\n\n"
-                                           + (previa or "Hoje não há nada atrasado, nem para cobrar hoje ou amanhã."))
+                                           "✅ <b>Teste dos avisos</b>\nÉ assim que chega, todo dia às 7h30.\n\n"
+                                           + (previa or "Hoje não há nada atrasado, nem para hoje ou amanhã."))
                     st.toast("Aviso de teste enviado. Olhe o Telegram.", icon="✅")
                 except Exception as e:
                     st.error(f"O Telegram recusou: {e}")
@@ -3873,7 +3889,8 @@ def tela_notificacoes():
                         _salvar_config(f"avisos:{eu}", "sim")
                         st.session_state.pop("_nt_codigo", None)
                         try:
-                            avisos_telegram.enviar(token, chat, f"✅ Avisos de cobrança ligados para <b>{_e(eu)}</b>. "
+                            o_que = "do Jurídico" if restrito else "de cobrança e do Jurídico"
+                            avisos_telegram.enviar(token, chat, f"✅ Avisos {o_que} ligados para <b>{_e(eu)}</b>. "
                                                                 "Eles chegam aqui todo dia às 7h30.")
                         except Exception:
                             pass
@@ -3882,6 +3899,11 @@ def tela_notificacoes():
                     elif not chat:
                         _erro_campo("Ainda não vi o seu toque. Abra o bot pelo botão 1, toque em COMEÇAR "
                                     "e confirme aqui de novo.")
+
+    if restrito:
+        _info("Chegam no Telegram as parcelas dos acordos atrasadas, as que vencem hoje e as que vencem "
+              "amanhã. Na segunda, o resumo da semana do Jurídico.", "cx-nota")
+        return   # o resto da tela (o que avisar, quem recebe) é de quem tem acesso a tudo
 
     with st.container(key="sec_nt2"):
         _titulo_secao(2, "O que avisar")
@@ -3894,9 +3916,12 @@ def tela_notificacoes():
     with st.container(key="sec_nt3"):
         _titulo_secao(3, "Quem recebe")
         recebem = dict(destinatarios(cfg))
+        recebem_jur = dict(destinatarios_juridico(cfg))
         for p in _pessoas():
             if p in recebem:
                 estado = "<span class='sit c-ok'>Recebe</span>"
+            elif p in recebem_jur:
+                estado = "<span class='sit c-ok'>Só Jurídico</span>"
             elif cfg.get(f"telegram:{p}"):
                 estado = "<span class='sit c-neutro'>Pausado</span>"
             else:
@@ -4151,7 +4176,7 @@ if st.session_state.tela not in telas:
     st.session_state.tela = "inicio"
 # Telas que quem tem acesso SÓ AO JURÍDICO pode abrir (lista do que PODE: tela nova fica fechada
 # para essa pessoa até alguém pôr aqui de propósito)
-TELAS_SO_JURIDICO = {"juridico", "judicial", "jud_form", "jud_ficha", "protestos", "prot_form"}
+TELAS_SO_JURIDICO = {"juridico", "judicial", "jud_form", "jud_ficha", "protestos", "prot_form", "notificacoes"}
 
 st.session_state["_avisou_fora"] = False   # o aviso "a planilha não respondeu" aparece uma vez por tela
 try:

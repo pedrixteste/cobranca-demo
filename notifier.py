@@ -10,6 +10,9 @@ Avisos de cobrança no Telegram. Roda pelo GitHub Actions todo dia às 07:30 BRT
     chaves telegram:<nome>) e não pausou os avisos. TELEGRAM_CHAT_IDS, se
     existir, é somado (jeito antigo, por secret).
   - O que entra na mensagem segue as chaves avisar_* / resumo_semanal do _Config.
+  - Jurídico (pedido 04/11): parcelas dos acordos (atrasadas, hoje, amanhã; na segunda, a semana e
+    o geral do Jurídico), no MESMO jeito. Quem tem acesso a tudo recebe cobranças + Jurídico numa
+    mensagem só; quem é "Só Jurídico" recebe só o Jurídico (nunca as cobranças).
 
 Variáveis de ambiente:
   SPREADSHEET_ID       planilha
@@ -65,7 +68,8 @@ def ler_planilha(spreadsheet_id: str) -> dict:
         for linha in abas["_Config"].get_all_values()[1:]:
             if len(linha) >= 2 and linha[0].strip():
                 config[linha[0].strip()] = linha[1].strip()
-    return {"cobrancas": ler("_Cobrancas"), "parcelas": ler("_Parcelas"), "config": config}
+    return {"cobrancas": ler("_Cobrancas"), "parcelas": ler("_Parcelas"), "config": config,
+            "judiciais": ler("_Judicial"), "protestos": ler("_Protestos")}
 
 
 # ── Texto ─────────────────────────────────────────────────────────────────────
@@ -138,6 +142,81 @@ def montar_semanal(cobs: list, hoje: date, opcoes: dict | None = None) -> str:
                f"Atrasado: {nucleo.formatar_brl(r['atrasado'])} ({r['n_atrasados']} cliente"
                f"{'s' if r['n_atrasados'] != 1 else ''})"]
     return "\n".join(linhas)
+
+
+# ── Jurídico (pedido 04/11) ───────────────────────────────────────────────────
+
+def _linha_jur(p: dict, j: dict, hoje: date) -> str:
+    d = p["vencimento"]
+    quando = d.strftime("%d/%m") if d.year == hoje.year else d.strftime("%d/%m/%Y")
+    atraso = (hoje - d).days
+    if atraso > 0:
+        quando += f" ({atraso} dia{'s' if atraso > 1 else ''} de atraso)"
+    onde = " · ".join(x for x in (j.get("turma", ""), j.get("objeto", "")) if x)
+    return (f"• <b>{_esc(j['cliente'])}</b>" + (f" ({_esc(onde)})" if onde else "")
+            + f" · {nucleo.formatar_brl(p['valor'])} · {_esc(p['rotulo'].lower())} · {quando}")
+
+
+def _secao_jur(titulo: str, itens: list, hoje: date) -> list:
+    if not itens:
+        return []
+    soma = sum(p["valor"] for p, _ in itens)
+    return ["", f"{titulo} ({len(itens)} · {nucleo.formatar_brl(soma)})"] + [_linha_jur(p, j, hoje) for p, j in itens]
+
+
+def montar_juridico(judiciais: list, protestos: list, hoje: date, semanal: bool = False,
+                    opcoes: dict | None = None) -> str | None:
+    """
+    Parte do Jurídico. Diário: só se tiver parcela de acordo atrasada, de hoje ou de amanhã.
+    Semanal (segunda): também o resto da semana e o geral do Jurídico (sempre que houver algo cadastrado).
+    None = nada a avisar (ou o aviso do Jurídico foi desligado na tela Notificações).
+    """
+    if not (opcoes or {}).get("avisar_juridico", True):
+        return None
+    a = nucleo.avisos_juridico(judiciais, hoje)
+    corpo = []
+    corpo += _secao_jur("🔴 <b>Acordos atrasados</b>", a["atrasadas"], hoje)
+    corpo += _secao_jur("🚨 <b>Vence hoje</b>", a["hoje"], hoje)
+    corpo += _secao_jur("⚠️ <b>Vence amanhã</b>", a["amanha"], hoje)
+    if not semanal:
+        if not corpo:
+            return None
+        return "\n".join([f"⚖️ <b>Jurídico · {DIAS_SEMANA[hoje.weekday()]}, {hoje.strftime('%d/%m/%Y')}</b>"] + corpo)
+    if not judiciais and not protestos:
+        return None
+    corpo += _secao_jur("📅 <b>Resto da semana</b>", a["semana"], hoje)
+    if not corpo:
+        corpo = ["", "Nenhuma parcela de acordo esta semana."]
+    r = nucleo.resumo_juridico(judiciais, protestos)
+    corpo += ["", "📊 <b>Geral do Jurídico</b>",
+              f"Na justiça: {r['n_judiciais']} ({r['n_sem_acordo']} sem acordo)",
+              f"Acordos: recebido {nucleo.formatar_brl(r['acordo_pago'])} · falta "
+              f"{nucleo.formatar_brl(r['acordo_falta'])} · atrasado {nucleo.formatar_brl(r['acordo_atrasado'])}",
+              f"Protestos em aberto: {r['n_protestos_abertos']}"]
+    domingo = nucleo.inicio_semana(hoje) + timedelta(days=6)
+    return "\n".join([f"⚖️ <b>Jurídico da semana · {hoje.strftime('%d/%m')} a {domingo.strftime('%d/%m/%Y')}</b>"]
+                     + corpo)
+
+
+def mensagens_por_chat(config: dict, texto_cobrancas: str | None, texto_juridico: str | None,
+                       chats_extras: list | None = None) -> dict:
+    """
+    {chat: texto} de cada pessoa. Acesso a tudo: cobranças + Jurídico. Só Jurídico: só o Jurídico.
+    TELEGRAM_CHAT_IDS (jeito antigo, por secret) recebe como acesso a tudo.
+    Quem não tem nada a receber não aparece.
+    """
+    tudo = [chat for _, chat in nucleo.destinatarios(config)] + list(chats_extras or [])
+    jur = [chat for _, chat in nucleo.destinatarios_juridico(config)] + list(chats_extras or [])
+    saida = {}
+    for chat in dict.fromkeys(tudo + jur):
+        partes = []
+        if chat in tudo and texto_cobrancas:
+            partes.append(texto_cobrancas)
+        if chat in jur and texto_juridico:
+            partes.append(texto_juridico)
+        if partes:
+            saida[chat] = "\n\n".join(partes)
+    return saida
 
 
 def dividir_mensagem(texto: str, limite: int = LIMITE_MENSAGEM) -> list:
@@ -215,28 +294,35 @@ def main() -> int:
         print("Resumo semanal desligado na tela Notificações: vai o aviso diário.")
         modo = "diario"
     texto = montar_semanal(cobs, hoje, opcoes) if modo == "semanal" else montar_diario(cobs, hoje, opcoes)
-    if not texto:
+    judiciais = nucleo.montar_judiciais(dados.get("judiciais", []), hoje)
+    protestos = nucleo.montar_protestos(dados.get("protestos", []))
+    texto_jur = montar_juridico(judiciais, protestos, hoje, modo == "semanal", opcoes)
+    print(f"Jurídico {len(judiciais)} | protestos {len(protestos)} | aviso do Jurídico: {'sim' if texto_jur else 'não'}")
+    extras = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if c.strip()]
+    mensagens = mensagens_por_chat(dados["config"], texto, texto_jur, extras)
+    if not texto and not texto_jur:
         print("Nada atrasado, nada para hoje nem amanhã. Nenhuma mensagem enviada.")
         return 0
     if dry:
-        for n, parte in enumerate(dividir_mensagem(texto), start=1):
-            print(f"\n──── parte {n} ({len(parte)} caracteres) ────\n{parte}")
+        for i, msg in enumerate(mensagens.values(), start=1):
+            for n, parte in enumerate(dividir_mensagem(msg), start=1):
+                print(f"\n──── pessoa {i}, parte {n} ({len(parte)} caracteres) ────\n{parte}")
+        if not mensagens:
+            print(texto or "", texto_jur or "", sep="\n\n")
         return 0
 
     token = _limpo(os.environ.get("TELEGRAM_BOT_TOKEN", ""))
-    chats = [chat for _, chat in nucleo.destinatarios(dados["config"])]
-    chats += [c.strip() for c in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",") if c.strip()]
-    chats = list(dict.fromkeys(chats))   # sem repetir, mantendo a ordem
     if not token:
         print("Telegram não configurado: falta TELEGRAM_BOT_TOKEN nos secrets.")
         return 1
-    if not chats:
-        print("Ninguém conectou o Telegram ainda (tela Notificações do app). Nenhuma mensagem enviada.")
+    if not mensagens:
+        print("Ninguém para receber hoje (ninguém conectou o Telegram, ou só há aviso de uma parte que essa "
+              "pessoa não recebe). Nenhuma mensagem enviada.")
         return 0
     ok = True
-    for i, chat in enumerate(chats, start=1):
-        print(f"Enviando para a pessoa {i} de {len(chats)}")
-        ok = enviar(token, chat, texto) and ok
+    for i, (chat, msg) in enumerate(mensagens.items(), start=1):
+        print(f"Enviando para a pessoa {i} de {len(mensagens)}")
+        ok = enviar(token, chat, msg) and ok
     return 0 if ok else 1
 
 
