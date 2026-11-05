@@ -309,11 +309,41 @@ class ClientePaciente(unittest.TestCase):
         self.assertIsInstance(r, self.APIError)
         self.assertEqual(chamadas, 1)
 
+    def _gravar(self, metodo, efeitos):
+        """Gravação vai direto na sessão (com o prazo da gravação), uma vez só."""
+        cliente = self.Cliente.__new__(self.Cliente)
+        cliente.session = mock.Mock()
+        cliente.session.request.side_effect = efeitos
+        with mock.patch("dados.time.sleep") as dorme:
+            try:
+                r = cliente.request(metodo, "url", params={"a": 1}, json={"b": 2})
+            except Exception as e:
+                r = e
+        return r, cliente.session.request, dorme.call_count
+
     def test_gravacao_nunca_repete(self):
         for metodo in ("post", "put"):
-            r, chamadas, _ = self._rodar(metodo, [self.requests.Timeout(), "ok"])
+            r, req, esperas = self._gravar(metodo, [self.requests.Timeout(), mock.Mock(ok=True)])
             self.assertIsInstance(r, self.requests.Timeout)
-            self.assertEqual(chamadas, 1, metodo)
+            self.assertEqual((req.call_count, esperas), (1, 0), metodo)
+
+    def test_gravacao_tem_prazo_maior_que_leitura(self):
+        """05/11: gravação que estoura o prazo pode ter entrado; prazo longo + conferir pelo ID no app."""
+        ok = mock.Mock(ok=True)
+        r, req, _ = self._gravar("post", [ok])
+        self.assertIs(r, ok)
+        _, kwargs = req.call_args
+        self.assertEqual(kwargs["timeout"], dados.TEMPO_LIMITE_GRAVACAO)
+        self.assertEqual((kwargs["params"], kwargs["json"], kwargs["method"], kwargs["url"]),
+                         ({"a": 1}, {"b": 2}, "post", "url"))
+        self.assertGreater(dados.TEMPO_LIMITE_GRAVACAO[1], 3 * dados.TEMPO_LIMITE[1])
+
+    def test_gravacao_recusada_vira_erro_da_planilha(self):
+        resp = mock.Mock(ok=False, status_code=400)
+        resp.json.return_value = {"error": {"code": 400, "message": "x", "status": "x"}}
+        r, req, _ = self._gravar("post", [resp])
+        self.assertIsInstance(r, self.APIError)
+        self.assertEqual(req.call_count, 1)
 
     def test_planilha_tem_prazo(self):
         with mock.patch("gspread.service_account_from_dict") as sa:

@@ -1,8 +1,10 @@
+import hashlib
 import html as _html
 import json
 import math
 import os
 import re
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -44,7 +46,7 @@ def _recarregar_modulos_alterados():
 _recarregar_modulos_alterados()
 
 from dados import (ABA_JUDICIAL, ABA_PROTESTOS, Local, Planilha, drive_configurado, enviar_comprovante,
-                   excluir_cobranca, receber_em_duas_formas, restaurar_cobranca)
+                   excluir_cobranca, novo_id, receber_em_duas_formas, restaurar_cobranca)
 from demo import banco_demo
 import avisos_telegram
 import feriados
@@ -1394,32 +1396,223 @@ def _bloco_conferencia(total, partes, prefixo: str) -> bool:
     return st.checkbox("Está certo assim, salvar mesmo com a diferença", key=f"{prefixo}aceito_dif")
 
 
+# ── Gravação que não se perde nem duplica (problema de 05/11/2026) ────────────
+# O que acontecia: gravar uma cobrança leva alguns segundos (vários pedidos ao Google) e a tela não
+# mostrava nada. Se a pessoa tocasse em qualquer coisa nesse meio tempo (de novo em Salvar, Voltar...),
+# o Streamlit começa NA HORA uma rodada nova, e a antiga, que estava gravando, é derrubada assim que
+# encosta no session_state. A gravação terminava (a cobrança ENTRAVA na planilha), mas a tela não ia para
+# a ficha, a leitura guardada não era limpa (o relatório não mostrava) e a trava "_salvando" ficava ligada
+# para sempre: todo Salvar seguinte não fazia NADA, sem aviso, até fechar o app. A pessoa redigitava e a
+# cobrança ficava repetida. Agora:
+#   1. a gravação roda sem st.* e sem session_state; o desfecho fica num "pedido" guardado ANTES, e a
+#      rodada que estiver valendo (a mesma ou uma nova) espera a gravação terminar e mostra o desfecho;
+#   2. o mesmo conteúdo tem sempre o mesmo ID (_id_da_gravacao): nova tentativa nunca duplica;
+#   3. erro na gravação → confere na planilha, pelo ID, se entrou mesmo assim;
+#   4. a leitura guardada é limpa sempre, com ou sem erro; 5. aviso "Salvando..." enquanto grava.
+
+ESPERA_PELA_GRAVACAO = 150   # segundos que uma rodada nova espera a gravação em andamento terminar
+ID_NOVO_VALE_POR = 30 * 60   # segundos em que o mesmo conteúdo digitado de novo reaproveita o ID
+
+
+class _NaoAchei(Exception):
+    """A gravação não achou o registro (alteração de algo que sumiu da planilha): nada foi gravado."""
+
+
+@st.cache_resource(show_spinner=False)
+def _memoria_gravacoes() -> dict:
+    """Comum a todas as sessões: {"trava", "ids": {assinatura: (id, quando)}, "travas": {id: trava}}."""
+    return {"trava": threading.Lock(), "ids": {}, "travas": {}}
+
+
+def _trava_do_id(rid: str):
+    """O mesmo registro nunca é gravado por duas rodadas (ou duas pessoas) ao mesmo tempo."""
+    mem = _memoria_gravacoes()
+    with mem["trava"]:
+        return mem["travas"].setdefault(rid, threading.Lock())
+
+
+def _id_da_gravacao(*conteudo):
+    """
+    O MESMO conteúdo (mesmos campos, mesmas parcelas, mesma pessoa, mesmo dia) ganha sempre o mesmo ID
+    por 30 minutos, em qualquer sessão: tocar em Salvar de novo, ou redigitar igual depois de o celular
+    recarregar a página, cai na mesma cobrança, que já está gravada, em vez de criar outra.
+    Devolve (id, trava do id).
+    """
+    texto = json.dumps(conteudo, sort_keys=True, default=str, ensure_ascii=False)
+    chave = hashlib.sha256(texto.encode("utf-8")).hexdigest()
+    mem = _memoria_gravacoes()
+    agora = time.monotonic()
+    with mem["trava"]:
+        for k, (rid, quando) in list(mem["ids"].items()):
+            if agora - quando > ID_NOVO_VALE_POR:
+                del mem["ids"][k]
+                trava = mem["travas"].get(rid)
+                if trava is not None and not trava.locked():
+                    del mem["travas"][rid]
+        if chave not in mem["ids"]:
+            mem["ids"][chave] = (novo_id(), agora)
+        rid = mem["ids"][chave][0]
+        return rid, mem["travas"].setdefault(rid, threading.Lock())
+
+
+def _esquecer_id(rid: str):
+    """Excluiu: o mesmo conteúdo cadastrado de novo vira um registro novo (não reaproveita o excluído)."""
+    mem = _memoria_gravacoes()
+    with mem["trava"]:
+        for k in [k for k, (r, _) in mem["ids"].items() if r == rid]:
+            del mem["ids"][k]
+
+
+def _aviso_salvando(texto: str):
+    """Aviso fixo no pé da tela enquanto grava (antes a tela não mostrava nada e a pessoa tocava de novo)."""
+    lugar = st.empty()
+    lugar.markdown(f"<div class='cx-salvando'><span class='cx-salvando-roda'></span>{_e(texto)}</div>",
+                   unsafe_allow_html=True)
+    return lugar
+
+
+def _conferir_se_entrou(conferir):
+    """Depois de um erro: a gravação entrou na planilha mesmo assim? True/False; None = não deu para saber."""
+    if conferir is None:
+        return None
+    resposta = None
+    for espera in (0, 2, 4):
+        time.sleep(espera)
+        try:
+            if conferir():
+                return True
+            resposta = False
+        except Exception as e:
+            print(f"[erro] conferindo a gravação: {e!r}", flush=True)
+    return resposta
+
+
+def _executar_gravacao(pedido: dict, trava, gravar, conferir):
+    """
+    A gravação em si. NADA de st.* nem de session_state aqui dentro: se a pessoa tocou em algo no meio,
+    esta rodada já foi derrubada e qualquer toque no session_state pararia tudo no meio do caminho.
+    """
+    try:
+        with trava:
+            try:
+                pedido["id"] = gravar() or pedido["id"]
+                pedido["deu_certo"] = True
+            except _NaoAchei as e:
+                pedido["erro"], pedido["deu_certo"] = e, False
+            except Exception as e:
+                print(f"[erro] gravação {pedido['id']}: {e!r}", flush=True)
+                pedido["erro"] = e
+                pedido["deu_certo"] = _conferir_se_entrou(conferir)
+    finally:
+        _invalidar()   # a leitura guardada é limpa SEMPRE (antes, erro aqui deixava o relatório velho)
+        pedido["pronto"].set()
+
+
+def _texto_nao_salvou(pedido: dict) -> str:
+    erro = pedido.get("erro")
+    if isinstance(erro, _NaoAchei):
+        return str(erro)
+    if pedido.get("deu_certo") is False:
+        texto = "Não salvou: nada foi gravado. Confira a internet e toque em Salvar de novo."
+    else:
+        texto = ("Não deu para confirmar se salvou (a planilha do Google não respondeu). Toque em Salvar "
+                 "de novo: se já tinha salvo, não fica repetido.")
+    if erro is not None and _sou_admin_sem_ler():
+        texto += f" Detalhe: {str(erro)[:180]}"
+    return texto
+
+
+def _aplicar_gravacao(pedido: dict) -> bool:
+    """Mostra o desfecho de uma gravação UMA vez, na rodada que estiver valendo. True = trocou de tela."""
+    with pedido["trava"]:
+        if pedido["aplicado"] or not pedido["pronto"].is_set():
+            return False
+        ss = st.session_state
+        if ss.get("_gravacao") is pedido:
+            del ss["_gravacao"]
+        if pedido["deu_certo"]:
+            _limpar_campos(pedido["prefixo"])
+            for chave, valor in pedido["ok"].get("estado", {}).items():
+                ss[chave] = pedido["id"] if valor == "{id}" else valor
+            _flash(pedido["ok"]["flash"])
+            ss.tela = pedido["ok"]["tela"]
+        elif ss.get("tela") == pedido["tela_form"]:
+            ss["_erro_salvar"] = (pedido["prefixo"], _texto_nao_salvou(pedido))   # embaixo do Salvar
+        else:
+            _flash(_texto_nao_salvou(pedido), "⚠️")   # a pessoa já saiu do formulário
+        pedido["aplicado"] = True
+        return bool(pedido["deu_certo"])
+
+
+def _gravar_sem_perder(prefixo: str, rid: str, trava, gravar, conferir, ok: dict, aviso: str):
+    """
+    Grava e mostra o desfecho, mesmo que a pessoa toque em outra coisa no meio.
+      gravar()   grava (sem st.* e sem session_state) e devolve o ID gravado
+      conferir() depois de um erro, diz se a gravação entrou mesmo assim; None = não dá para conferir
+      ok         {"tela", "flash", "estado": {chave: valor}} quando deu certo ("{id}" vira o ID gravado)
+    """
+    lugar = _aviso_salvando(aviso)
+    st.session_state.pop("_erro_salvar", None)
+    pedido = {"prefixo": prefixo, "tela_form": st.session_state.get("tela"), "ok": ok, "id": rid,
+              "deu_certo": None, "erro": None, "pronto": threading.Event(), "trava": threading.Lock(),
+              "aplicado": False}
+    # Último toque no session_state ANTES de gravar: daqui até o fim da gravação esta rodada não para
+    st.session_state["_gravacao"] = pedido
+    _executar_gravacao(pedido, trava, gravar, conferir)
+    lugar.empty()   # se a pessoa tocou em algo no meio, esta rodada para aqui e a nova mostra o desfecho
+    if _aplicar_gravacao(pedido):
+        st.rerun()
+
+
+def _esperar_gravacao_em_andamento():
+    """
+    No começo de toda rodada: se uma gravação começou numa rodada que foi interrompida (a pessoa tocou em
+    algo no meio), espera ela terminar e mostra o desfecho (a ficha do que foi salvo, ou o aviso de que
+    não salvou). Antes, esse desfecho se perdia.
+    """
+    pedido = st.session_state.get("_gravacao")
+    if not pedido or pedido["aplicado"]:
+        return
+    if not pedido["pronto"].is_set():
+        lugar = _aviso_salvando("Salvando…")
+        pedido["pronto"].wait(ESPERA_PELA_GRAVACAO)
+        lugar.empty()
+        if not pedido["pronto"].is_set():
+            _info("A planilha do Google está demorando para confirmar a gravação. Espere um pouco antes de "
+                  "tentar de novo.", "cx-perigo")
+            return
+    if _aplicar_gravacao(pedido):
+        st.rerun()
+
+
+def _aviso_do_salvar(prefixo: str):
+    """Embaixo do botão Salvar: o aviso de que a gravação NÃO deu certo (mesmo quando quem descobriu foi
+    uma rodada nova, porque a pessoa tocou em algo no meio da gravação)."""
+    erro = st.session_state.get("_erro_salvar")
+    if erro and erro[0] == prefixo:
+        del st.session_state["_erro_salvar"]
+        st.error(erro[1])
+
+
 def _salvar(tipo: str, cliente: str, turma: str, treino: str, total: float, parcelas: list, prefixo: str,
             observacoes: str = ""):
-    if st.session_state.get("_salvando"):
-        return
-    st.session_state["_salvando"] = True
-    try:
-        cid = _banco().criar_cobranca(
-            # Tudo que se digita vai em MAIÚSCULA (pedido 16/10)
-            {"Tipo": tipo, "Cliente": cliente.upper(), "Turma": turma, "Treinamento": treino,
-             "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
-             "Observações": observacoes.strip().upper(),
-             "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split()).upper(),
-             "Telefone": formatar_telefone(st.session_state.get(f"{prefixo}{CHAVE_TEL}", ""))},
-            parcelas,
-        )
-    except Exception as e:
-        st.error(f"Não consegui salvar: {_erro_curto(e)}")
-        return
-    finally:
-        st.session_state["_salvando"] = False
-    _invalidar()
-    _limpar_campos(prefixo)
-    st.session_state.cob_id = cid
-    st.session_state.cob_volta = "inicio"
-    _flash(f"Cobrança de {cliente.upper()} salva")
-    _ir("cobranca")
+    campos = {
+        # Tudo que se digita vai em MAIÚSCULA (pedido 16/10)
+        "Tipo": tipo, "Cliente": cliente.upper(), "Turma": turma, "Treinamento": treino,
+        "Valor Total": total, "Criada em": _hoje(), "Criada por": _usuario(),
+        "Observações": observacoes.strip().upper(),
+        "Cidade": " ".join(str(st.session_state.get(f"{prefixo}cidade", "")).split()).upper(),
+        "Telefone": formatar_telefone(st.session_state.get(f"{prefixo}{CHAVE_TEL}", "")),
+    }
+    cid, trava = _id_da_gravacao("cobranca", campos, parcelas)
+    banco = _banco()
+    _gravar_sem_perder(
+        prefixo, cid, trava,
+        gravar=lambda: banco.criar_cobranca(campos, parcelas, cid=cid),
+        conferir=lambda: banco.cobranca_existe(cid),
+        ok={"tela": "cobranca", "flash": f"Cobrança de {cliente.upper()} salva",
+            "estado": {"cob_id": "{id}", "cob_volta": "inicio"}},
+        aviso="Salvando a cobrança…")
 
 
 # ── Blocos do Pix e do cartão (as telas Pix, Cartão e Híbrida usam os mesmos) ──
@@ -1654,6 +1847,7 @@ def tela_pix():
         else:
             _salvar(TIPO_PIX, cliente, turma, treino, total,
                     parcelas_pix(entrada, data_entrada, valores, datas, hoje, pagas), "px_", obs_px)
+    _aviso_do_salvar("px_")
 
 
 # ── Cobrança cartão ───────────────────────────────────────────────────────────
@@ -1709,6 +1903,7 @@ def tela_cartao():
             _salvar(TIPO_CARTAO, cliente, turma, treino, total,
                     parcelas_cartao(ja_pago, hoje, [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem]), "ct_", obs_ct)
+    _aviso_do_salvar("ct_")
 
 
 # ── Cobrança híbrida (uma parte no Pix, outra no cartão) ──────────────────────
@@ -1815,6 +2010,7 @@ def tela_hibrido():
                                      [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
                                      [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje, pix_pagas),
                     "hb_", obs_hb)
+    _aviso_do_salvar("hb_")
 
 
 # ── Permuta (treinamento em troca de produtos ou serviços) ────────────────────
@@ -1994,6 +2190,7 @@ def tela_permuta():
         else:
             _salvar(TIPO_PERMUTA, cliente, turma, treino, total,
                     parcelas_permuta(retiradas, _usuario(), creditos), "pm_", obs_pm)
+    _aviso_do_salvar("pm_")
 
 
 # ── Relatório ─────────────────────────────────────────────────────────────────
@@ -2599,6 +2796,7 @@ def _dlg_excluir(cid: str):
                 st.error(f"Não consegui excluir: {_erro_curto(e)}")
                 return
             _invalidar()
+            _esquecer_id(cid)
             _flash("Cobrança excluída")
             st.session_state.tela = st.session_state.get("cob_volta", "relatorio")
             st.rerun()
@@ -3115,6 +3313,7 @@ def _dlg_excluir_juridico(aba: str, rid: str, o_que: str, volta: str):
                 st.error("Não achei esse registro na planilha. Feche e abra de novo.")
                 return
             _invalidar()
+            _esquecer_id(rid)
             _flash("Excluído")
             st.session_state.tela = volta
             st.rerun()
@@ -3466,46 +3665,46 @@ def tela_jud_form():
                 "Valor cobrado": valor, "No jurídico desde": desde, "Advogado": advogado.upper(),
                 "Negociação": neg, "Valor do acordo": valor_acordo if neg else "",
             }, neg, valores, datas)
+    _aviso_do_salvar("jf_")
 
 
 def _salvar_judicial(atual: dict | None, campos: dict, neg: str, valores: list, datas: list):
-    if st.session_state.get("_salvando") or not _pode_gravar_juridico():
+    # (a trava "_salvando" saiu em 05/11: se a pessoa tocasse em algo no meio da gravação, ela ficava ligada
+    # e nenhum Salvar funcionava mais; agora quem segura é _gravar_sem_perder)
+    if not _pode_gravar_juridico():
         return
-    st.session_state["_salvando"] = True
-    try:
-        anteriores = []
-        if atual:
-            # Relê na hora de gravar: se alguém marcou uma parcela como paga com este formulário
-            # aberto, a marca não se perde
-            _invalidar()
-            fresco = _judicial(atual["id"]) or atual
-            anteriores = fresco["parcelas"] if fresco["negociacao"] == neg else []
-        if len(valores) > MAX_PARCELAS_ACORDO:
-            st.error(f"O acordo pode ter no máximo {MAX_PARCELAS_ACORDO} parcelas.")
-            return
-        campos["Acordo"] = acordo_para_texto(parcelas_do_acordo(valores, datas, anteriores)) if neg else ""
-        if atual:
-            jid = atual["id"]
-            if not _banco().atualizar_registro(ABA_JUDICIAL, jid, {**campos, "Alterada por": _usuario(),
-                                                                   "Alterada em": _hoje()},
-                                               historico=_hist("edição")):
-                st.error("Não achei essa cobrança judicial na planilha. Volte e abra de novo.")
-                return
-        else:
-            jid = _banco().criar_registro(ABA_JUDICIAL, {**campos, "Cadastrada por": _usuario(),
-                                                         "Criada em": _hoje(), "Situação": SITUACAO_ATIVA},
-                                          historico=_hist("cadastro"))
-    except Exception as e:
-        st.error(f"Não consegui salvar: {_erro_curto(e)}")
+    anteriores = []
+    if atual:
+        # Relê na hora de gravar: se alguém marcou uma parcela como paga com este formulário
+        # aberto, a marca não se perde
+        _invalidar()
+        fresco = _judicial(atual["id"]) or atual
+        anteriores = fresco["parcelas"] if fresco["negociacao"] == neg else []
+    if len(valores) > MAX_PARCELAS_ACORDO:
+        st.error(f"O acordo pode ter no máximo {MAX_PARCELAS_ACORDO} parcelas.")
         return
-    finally:
-        st.session_state["_salvando"] = False
-    _invalidar()
-    _limpar_campos("jf_")
-    st.session_state.jud_id = jid
-    st.session_state.jud_edit = None
-    _flash(f"Cobrança judicial de {campos['Cliente']} salva")
-    _ir("jud_ficha")
+    campos["Acordo"] = acordo_para_texto(parcelas_do_acordo(valores, datas, anteriores)) if neg else ""
+    banco = _banco()
+    if atual:
+        jid = atual["id"]
+        mudou = {**campos, "Alterada por": _usuario(), "Alterada em": _hoje()}
+        hist = _hist("edição")
+
+        def gravar():
+            if not banco.atualizar_registro(ABA_JUDICIAL, jid, mudou, historico=hist):
+                raise _NaoAchei("Não achei essa cobrança judicial na planilha. Volte e abra de novo.")
+            return jid
+        trava, conferir = _trava_do_id(jid), None
+    else:
+        novo = {**campos, "Cadastrada por": _usuario(), "Criada em": _hoje(), "Situação": SITUACAO_ATIVA}
+        hist = _hist("cadastro")
+        jid, trava = _id_da_gravacao(ABA_JUDICIAL, novo)
+        gravar = lambda: banco.criar_registro(ABA_JUDICIAL, novo, historico=hist, rid=jid)
+        conferir = lambda: banco.registro_existe(ABA_JUDICIAL, jid)
+    _gravar_sem_perder("jf_", jid, trava, gravar, conferir,
+                       ok={"tela": "jud_ficha", "flash": f"Cobrança judicial de {campos['Cliente']} salva",
+                           "estado": {"jud_id": "{id}", "jud_edit": None}},
+                       aviso="Salvando…")
 
 
 def _html_parcela_acordo(p: dict, hoje: date) -> str:
@@ -3759,34 +3958,36 @@ def tela_prot_form():
                 "Protestado em": data, "Pago": pago, "Pago em": pago_em if pago else "",
                 "Marcado por": (ja_marcado or _usuario()) if pago else "",
             })
+    _aviso_do_salvar("pf_")
     if atual and st.button("Excluir protesto", key="pt_excluir", icon=":material/delete:", use_container_width=True):
         _dlg_excluir_juridico(ABA_PROTESTOS, atual["id"], f"o protesto de {atual['cliente']}", "protestos")
 
 
 def _salvar_protesto(atual: dict | None, campos: dict):
-    if st.session_state.get("_salvando") or not _pode_gravar_juridico():
+    # (sem a trava "_salvando" desde 05/11, como em _salvar_judicial)
+    if not _pode_gravar_juridico():
         return
-    st.session_state["_salvando"] = True
-    try:
-        if atual:
-            if not _banco().atualizar_registro(ABA_PROTESTOS, atual["id"], {**campos, "Alterado por": _usuario(),
-                                                                            "Alterado em": _hoje()},
-                                               historico=_hist("edição")):
-                st.error("Não achei esse protesto na planilha. Volte e abra de novo.")
-                return
-        else:
-            _banco().criar_registro(ABA_PROTESTOS, {**campos, "Cadastrado por": _usuario(), "Criado em": _hoje(),
-                                                    "Situação": SITUACAO_ATIVA}, historico=_hist("cadastro"))
-    except Exception as e:
-        st.error(f"Não consegui salvar: {_erro_curto(e)}")
-        return
-    finally:
-        st.session_state["_salvando"] = False
-    _invalidar()
-    _limpar_campos("pf_")
-    st.session_state.prot_edit = None
-    _flash(f"Protesto de {campos['Cliente']} salvo")
-    _ir("protestos")
+    banco = _banco()
+    if atual:
+        pid = atual["id"]
+        mudou = {**campos, "Alterado por": _usuario(), "Alterado em": _hoje()}
+        hist = _hist("edição")
+
+        def gravar():
+            if not banco.atualizar_registro(ABA_PROTESTOS, pid, mudou, historico=hist):
+                raise _NaoAchei("Não achei esse protesto na planilha. Volte e abra de novo.")
+            return pid
+        trava, conferir = _trava_do_id(pid), None
+    else:
+        novo = {**campos, "Cadastrado por": _usuario(), "Criado em": _hoje(), "Situação": SITUACAO_ATIVA}
+        hist = _hist("cadastro")
+        pid, trava = _id_da_gravacao(ABA_PROTESTOS, novo)
+        gravar = lambda: banco.criar_registro(ABA_PROTESTOS, novo, historico=hist, rid=pid)
+        conferir = lambda: banco.registro_existe(ABA_PROTESTOS, pid)
+    _gravar_sem_perder("pf_", pid, trava, gravar, conferir,
+                       ok={"tela": "protestos", "flash": f"Protesto de {campos['Cliente']} salvo",
+                           "estado": {"prot_edit": None}},
+                       aviso="Salvando…")
 
 
 # ── Notificações ──────────────────────────────────────────────────────────────
@@ -4147,6 +4348,7 @@ def _iframe_invisivel(html_js: str):
 # ── Roteador ──────────────────────────────────────────────────────────────────
 
 st.session_state.setdefault("tela", "inicio")
+_esperar_gravacao_em_andamento()   # gravação que começou numa rodada interrompida: mostra o desfecho (05/11)
 _mostrar_flash()
 if _modo_demo():
     st.markdown("<div class='demo-faixa'><b>Demonstração</b> · clientes de exemplo, pode testar à "

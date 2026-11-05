@@ -405,3 +405,15 @@ header[data-testid="stHeader"] { display: none; }
 .cf-meta  { font-size: .8rem; color: var(--apoio); margin-top: -2px; }
 /* Código do aparelho novo (liberação por código, pedido 04/11) */
 .cf-codigo { font-family: var(--mono); letter-spacing: .12em; font-size: 1.05em; }
+/* "Salvando..." fixo no pé da tela enquanto grava (problema de 05/11: a tela não mostrava nada e a
+   pessoa tocava de novo). Fica por cima de tudo, no meio, com a rodinha girando. */
+.cx-salvando { position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); z-index: 999999;
+    display: flex; align-items: center; gap: .6rem; max-width: calc(100vw - 2rem); padding: .75rem 1.1rem;
+    background: var(--marca-bg); color: var(--marca-2); border: 1px solid var(--marca-borda); border-radius: 14px;
+    font-weight: 600; font-size: .98rem; box-shadow: 0 8px 28px rgba(0,0,0,.55); white-space: nowrap; }
+.cx-salvando-roda { width: 1.05rem; height: 1.05rem; border-radius: 50%; flex: none;
+    border: 2.5px solid var(--marca-borda); border-top-color: transparent; animation: cx-gira .8s linear infinite; }
+@keyframes cx-gira { to { transform: rotate(360deg); } }
+/* Botão escondido da setinha de voltar do celular: escondido também aqui (o <style> da tela some
+   por um instante enquanto a tela é redesenhada, e o botão aparecia durante o "Salvando...") */
+.st-key-_btn_voltar_hw { display: none; }

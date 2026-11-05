@@ -31,6 +31,7 @@ CONFIG_HEADERS = ["Chave", "Valor"]
 
 # Abas de "uma linha por registro, achado pelo ID" (gravadas por criar_registro/atualizar_registro)
 HEADERS_DA_ABA = {ABA_JUDICIAL: JUDICIAL_HEADERS, ABA_PROTESTOS: PROTESTOS_HEADERS}
+_HEADERS_POR_ABA = {ABA_COBRANCAS: COBRANCAS_HEADERS, ABA_PARCELAS: PARCELAS_HEADERS, **HEADERS_DA_ABA}
 # O que o app lê de uma vez (a _Config tem leitura própria, guardada por mais tempo)
 _ABAS_DO_APP = (ABA_COBRANCAS, ABA_PARCELAS, ABA_JUDICIAL, ABA_PROTESTOS)
 _CHAVE_DA_ABA = {ABA_COBRANCAS: "cobrancas", ABA_PARCELAS: "parcelas",
@@ -39,6 +40,10 @@ _CHAVE_DA_ABA = {ABA_COBRANCAS: "cobrancas", ABA_PARCELAS: "parcelas",
 # Pedido do Google com prazo (antes não tinha: uma resposta que não vinha deixava o app parado,
 # e todo mundo que abria ficava esperando junto). (conectar, receber) em segundos.
 TEMPO_LIMITE = (5, 12)
+# Gravação tem prazo BEM maior (05/11): gravação que estoura o prazo pode ter entrado na planilha mesmo
+# assim (o Google gravou e só a resposta se perdeu). Por isso o app também confere pelo ID antes de
+# dizer que não salvou, e repete o mesmo ID em nova tentativa (criar_cobranca não duplica).
+TEMPO_LIMITE_GRAVACAO = (10, 60)
 # Leitura que falhou por motivo passageiro tenta de novo depois destas esperas (segundos)
 ESPERAS_LEITURA = (1.0, 2.5)
 _CODIGOS_PASSAGEIROS = (408, 429, 500, 502, 503, 504)
@@ -97,7 +102,7 @@ def _cliente_paciente():
     class ClientePaciente(HTTPClient):
         def request(self, method, endpoint, *args, **kwargs):
             if str(method).lower() != "get":
-                return super().request(method, endpoint, *args, **kwargs)
+                return self._gravar(method, endpoint, *args, **kwargs)
             for espera in (*ESPERAS_LEITURA, None):
                 try:
                     return super().request(method, endpoint, *args, **kwargs)
@@ -109,6 +114,14 @@ def _cliente_paciente():
                     if espera is None:
                         raise
                 time.sleep(espera)
+
+        def _gravar(self, method, endpoint, params=None, data=None, json=None, files=None, headers=None):
+            # O mesmo pedido do HTTPClient.request do gspread, só que com o prazo da GRAVAÇÃO (uma vez só)
+            resposta = self.session.request(method=method, url=endpoint, json=json, params=params, data=data,
+                                            files=files, headers=headers, timeout=TEMPO_LIMITE_GRAVACAO)
+            if resposta.ok:
+                return resposta
+            raise APIError(resposta)
 
     return ClientePaciente
 
@@ -129,6 +142,41 @@ class Planilha:
         # Atualizado quando o app cria uma aba; conferido de novo se uma leitura reclamar de aba.
         self._existentes: set | None = None
         self._conferido_em = 0.0
+        # Abas das cobranças já abertas para gravar (abrir custa 2 pedidos ao Google; antes era a cada
+        # cobrança nova). Esquecidas se uma gravação der erro (alguém pode ter mexido nas abas).
+        self._abertas: dict = {}
+
+    def _aba_para_gravar(self, nome: str, headers: list):
+        ws = self._abertas.get(nome)
+        if ws is None:
+            ws = self._abertas[nome] = self._aba(nome, headers)
+        return ws
+
+    def _cabecalhos_e_ids(self, abas) -> dict:
+        """
+        {aba: (cabeçalho, IDs já gravados)} de cada (aba, coluna do ID), num pedido de LEITURA só
+        (pode tentar de novo). O ID fica na coluna A; se alguém mudou isso na planilha, lê pela coluna certa.
+        """
+        faixas = [f for nome, _ in abas for f in (f"'{nome}'!1:1", f"'{nome}'!A:A")]
+        blocos = self._gc.http_client.values_batch_get(self._id, faixas).get("valueRanges", [])
+        if len(blocos) != len(faixas):
+            raise RuntimeError(f"pedi {len(faixas)} faixas e a planilha devolveu {len(blocos)}")
+        lido = {}
+        for i, (nome, coluna_id) in enumerate(abas):
+            cab = (blocos[2 * i].get("values") or [[]])[0]
+            if coluna_id not in cab:
+                raise RuntimeError(f"a aba {nome} está sem a coluna {coluna_id}")
+            if cab.index(coluna_id) == 0:
+                coluna = [l[0] if l else "" for l in blocos[2 * i + 1].get("values", [])]
+            else:
+                coluna = self._aba_para_gravar(nome, _HEADERS_POR_ABA.get(nome, [])).col_values(cab.index(coluna_id) + 1)
+            lido[nome] = (cab, {str(v).strip() for v in coluna[1:] if str(v).strip()})
+        return lido
+
+    def cobranca_existe(self, cid: str) -> bool:
+        """A cobrança com este ID está na planilha? (para conferir depois de uma gravação que deu erro)"""
+        self._aba_para_gravar(ABA_COBRANCAS, COBRANCAS_HEADERS)
+        return cid in self._cabecalhos_e_ids(((ABA_COBRANCAS, "ID"),))[ABA_COBRANCAS][1]
 
     def _abas_existentes(self) -> set:
         # Falta aba do app e já faz 5 min que conferiu: confere de novo (alguém pode ter criado)
@@ -214,21 +262,33 @@ class Planilha:
         else:
             ws.append_row([chave, valor], value_input_option="RAW", table_range="A1")
 
-    def criar_cobranca(self, campos: dict, parcelas: list[dict]) -> str:
-        cid = novo_id()
+    def criar_cobranca(self, campos: dict, parcelas: list[dict], cid: str | None = None) -> str:
+        """
+        Grava a cobrança e as parcelas. Com `cid` (o app gera UM por cobrança digitada e repete o mesmo
+        em toda nova tentativa) a gravação nunca duplica (05/11): se a cobrança já está na planilha, não
+        grava nada; se só as parcelas entraram (a tentativa anterior caiu no meio), grava só a cobrança.
+        3 pedidos ao Google (antes eram 8): ler cabeçalhos e IDs de uma vez, parcelas, cobrança.
+        """
+        cid = cid or novo_id()
         campos = {**campos, "ID": cid, "Situação": SITUACAO_ATIVA,
                   "Criada em": campos.get("Criada em") or date.today()}
-        ws_c = self._aba(ABA_COBRANCAS, COBRANCAS_HEADERS)
-        ws_p = self._aba(ABA_PARCELAS, PARCELAS_HEADERS)
-        cab_p = ws_p.row_values(1)
-        hoje = date.today()
-        linhas_p = [_linha(cab_p, {**p, "ID Cobrança": cid, "Registrado em": hoje}) for p in parcelas]
-        # Parcelas primeiro: se a gravação da cobrança falhar, sobram linhas
-        # órfãs (invisíveis no app), e não uma cobrança sem parcelas.
-        if linhas_p:
-            ws_p.append_rows(linhas_p, value_input_option="RAW", table_range="A1")
-        ws_c.append_row(_linha(ws_c.row_values(1), campos), value_input_option="RAW",
-                        table_range="A1")
+        try:
+            ws_c = self._aba_para_gravar(ABA_COBRANCAS, COBRANCAS_HEADERS)
+            ws_p = self._aba_para_gravar(ABA_PARCELAS, PARCELAS_HEADERS)
+            lido = self._cabecalhos_e_ids(((ABA_COBRANCAS, "ID"), (ABA_PARCELAS, "ID Cobrança")))
+            (cab_c, ids_c), (cab_p, ids_p) = lido[ABA_COBRANCAS], lido[ABA_PARCELAS]
+            if cid in ids_c:
+                return cid   # já estava gravada (uma tentativa anterior chegou na planilha)
+            hoje = date.today()
+            linhas_p = [_linha(cab_p, {**p, "ID Cobrança": cid, "Registrado em": hoje}) for p in parcelas]
+            # Parcelas primeiro: se a gravação da cobrança falhar, sobram linhas
+            # órfãs (invisíveis no app), e não uma cobrança sem parcelas.
+            if linhas_p and cid not in ids_p:
+                ws_p.append_rows(linhas_p, value_input_option="RAW", table_range="A1")
+            ws_c.append_row(_linha(cab_c, campos), value_input_option="RAW", table_range="A1")
+        except Exception:
+            self._abertas.clear()
+            raise
         return cid
 
     def _atualizar(self, ws, linha: int, cabecalho: list, campos: dict):
@@ -285,13 +345,22 @@ class Planilha:
         ws.append_row(_linha(ws.row_values(1), linha_historico(aba, rid, historico, antes, depois)),
                       value_input_option="RAW", table_range="A1")
 
-    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None) -> str:
-        rid = novo_id()
+    def registro_existe(self, aba: str, rid: str) -> bool:
         ws = self._aba(aba, HEADERS_DA_ABA[aba])
+        cab = ws.row_values(1)
+        return rid in ws.col_values(cab.index("ID") + 1)[1:]
+
+    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None, rid: str | None = None) -> str:
+        """Com `rid` repetido numa nova tentativa, não duplica: se o registro já está na aba, não grava (05/11)."""
+        rid = rid or novo_id()
+        ws = self._aba(aba, HEADERS_DA_ABA[aba])
+        cab = ws.row_values(1)
+        if rid in ws.col_values(cab.index("ID") + 1)[1:]:
+            return rid
         linha = {**campos, "ID": rid}
         if historico is not None:   # o rastro vem ANTES: se a gravação falhar, sobra só o rastro
             self._historico(aba, rid, historico, {}, linha)
-        ws.append_row(_linha(ws.row_values(1), linha), value_input_option="RAW", table_range="A1")
+        ws.append_row(_linha(cab, linha), value_input_option="RAW", table_range="A1")
         return rid
 
     def atualizar_registro(self, aba: str, rid: str, campos: dict, historico: dict | None = None) -> bool:
@@ -353,16 +422,43 @@ class Local:
         d.setdefault("config", {})[chave] = valor
         self._gravar(d)
 
-    def criar_cobranca(self, campos: dict, parcelas: list[dict]) -> str:
+    @staticmethod
+    def _gravacao_simulada() -> dict:
+        """Só para teste: COBRANCA_LENTO=<arquivo> imita o Google devagar enquanto o arquivo existir.
+        Conteúdo (JSON): {"segundos": 6} demora e grava; + "falha_depois": true grava e mesmo assim dá
+        erro (a resposta se perdeu no caminho); + "falha_antes": true dá erro sem gravar nada."""
+        arq = os.environ.get("COBRANCA_LENTO", "").strip()
+        if not arq or not os.path.exists(arq):
+            return {}
+        try:
+            with open(arq, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    def cobranca_existe(self, cid: str) -> bool:
+        return any(c.get("ID") == cid for c in self._ler()["cobrancas"])
+
+    def criar_cobranca(self, campos: dict, parcelas: list[dict], cid: str | None = None) -> str:
+        """Igual à Planilha: com `cid` repetido não duplica (cobrança já gravada = não grava nada)."""
+        sim = self._gravacao_simulada()
+        time.sleep(float(sim.get("segundos", 0)))
+        if sim.get("falha_antes"):
+            raise TimeoutError("o Google não respondeu no prazo (simulado no teste, nada gravado)")
         d = self._ler()
-        cid = novo_id()
+        cid = cid or novo_id()
+        if any(c.get("ID") == cid for c in d["cobrancas"]):
+            return cid
         campos = {**campos, "ID": cid, "Situação": SITUACAO_ATIVA,
                   "Criada em": campos.get("Criada em") or date.today()}
+        if not any(p.get("ID Cobrança") == cid for p in d["parcelas"]):
+            for p in parcelas:
+                p = {**p, "ID Cobrança": cid, "Registrado em": date.today()}
+                d["parcelas"].append({h: _celula(p.get(h)) for h in PARCELAS_HEADERS})
         d["cobrancas"].append({h: _celula(campos.get(h)) for h in COBRANCAS_HEADERS})
-        for p in parcelas:
-            p = {**p, "ID Cobrança": cid, "Registrado em": date.today()}
-            d["parcelas"].append({h: _celula(p.get(h)) for h in PARCELAS_HEADERS})
         self._gravar(d)
+        if sim.get("falha_depois"):
+            raise TimeoutError("o Google gravou, mas a resposta não chegou no prazo (simulado no teste)")
         return cid
 
     def atualizar_cobranca(self, cid: str, campos: dict) -> bool:
@@ -397,9 +493,14 @@ class Local:
         self._gravar(d)
         return len(d["parcelas"]) < antes
 
-    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None) -> str:
+    def registro_existe(self, aba: str, rid: str) -> bool:
+        return any(l.get("ID") == rid for l in self._ler().get(_CHAVE_DA_ABA[aba], []))
+
+    def criar_registro(self, aba: str, campos: dict, historico: dict | None = None, rid: str | None = None) -> str:
         d = self._ler()
-        rid = novo_id()
+        rid = rid or novo_id()
+        if any(l.get("ID") == rid for l in d.get(_CHAVE_DA_ABA[aba], [])):
+            return rid
         campos = {**campos, "ID": rid}
         d.setdefault(_CHAVE_DA_ABA[aba], []).append({h: _celula(campos.get(h)) for h in HEADERS_DA_ABA[aba]})
         if historico is not None:
