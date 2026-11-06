@@ -43,6 +43,13 @@ def semear(banco, hoje: date):
                           "Treinamento": "LORAP", "Valor Total": 6000.0},
                          parcelas_hibrido(1000, d(-8), [1000.0, 1000.0], datas_continuas(d(22), 2),
                                           [1500.0, 1500.0], [d(-8), d(14)], [3, 3], [True, False], hoje))
+    # Híbrida Pix + permuta (pedido 06/11): entrada + 4 parcelas no Pix e o resto em produtos da
+    # empresa do cliente, com uma retirada já feita (sem observação: o roteiro das observações conta)
+    banco.criar_cobranca({"Tipo": "Híbrido", "Cliente": "FLORICULTURA JARDIM (EXEMPLO)", "Turma": "L347",
+                          "Treinamento": "LORAP", "Valor Total": 8000.0},
+                         parcelas_hibrido(1000, d(-20), [1000.0] * 4, datas_continuas(d(10), 4), [], [],
+                                          None, None, hoje, creditos=[(d(-20), 3000.0)],
+                                          retiradas=[("ARRANJOS DE FLORES PARA O EVENTO", d(-6), 600.0)]))
     # Permuta: treinamento trocado por produtos da empresa; 2 meses depois fechou outra (2º valor)
     banco.criar_cobranca({"Tipo": "Permuta", "Cliente": "PADARIA BOM GOSTO (EXEMPLO)", "Turma": "V12, I7",
                           "Treinamento": "Vendas, Impacto", "Valor Total": 5500.0},

@@ -219,7 +219,8 @@ with sync_playwright() as p:
     # ── 4. relatório ──
     ir_ao_relatorio(page)
     hib = [x.inner_text().split("\n")[0] for x in page.locator(".cc").all() if x.locator(".tp-hib").count()]
-    confere("relatório: 3 cobranças com a etiqueta Híbrido", len(hib) == 3, str(hib))
+    # 4 = Bruna + Roberto (virou híbrida) + os exemplos Juliana (Pix + cartão) e FLORICULTURA (Pix + permuta, 06/11)
+    confere("relatório: 4 cobranças com a etiqueta Híbrido", len(hib) == 4, str(hib))
     juliana = page.locator(".cc", has_text="Juliana Martins").inner_text().replace("\n", " ")
     confere("cartão do relatório diz a forma da próxima", "no cartão" in juliana or "no Pix" in juliana, juliana)
     alturas = [round(x.bounding_box()["height"]) for x in page.locator(".cc").all()]
@@ -228,7 +229,7 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT / "hibrido_7_relatorio.png"), full_page=True)
     page.get_by_text("Filtros", exact=True).first.click(); esperar(page)
     page.locator("[data-testid=stExpander] button", has_text="Híbrido").first.click(); esperar(page)
-    confere("filtro 'Híbrido' mostra só as 3", page.locator(".cc").count() == 3 and page.locator(".cc .tp-hib").count() == 3)
+    confere("filtro 'Híbrido' mostra só as 4", page.locator(".cc").count() == 4 and page.locator(".cc .tp-hib").count() == 4)
     page.locator("[data-testid=stExpander] button", has_text="Híbrido").first.click(); esperar(page)
     page.locator("[data-testid=stExpander] button", has_text="Pix").first.click(); esperar(page)
     confere("filtro 'Pix' não traz híbrida", page.locator(".cc .tp-hib").count() == 0 and 0 < page.locator(".cc").count() < total,

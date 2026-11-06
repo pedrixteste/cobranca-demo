@@ -59,7 +59,7 @@ from nucleo import (CLI_ATRASADO, CLI_EM_BREVE, CLI_EM_DIA, CLI_QUITADO, OPCOES_
                     pessoa_do_email,
                     texto_vezes,
                     FORMAS, TIPO_HIBRIDO, centavos, dividir_recebimento, parcelas_hibrido,
-                    TIPO_PERMUTA, TIPO_CREDITO, parcelas_permuta, permutas_do_cliente,
+                    TIPO_PERMUTA, TIPO_CREDITO, parcelas_permuta, permutas_do_cliente, FORMAS_HIBRIDO,
                     SEP_TURMAS_PLANILHA, normalizar_turmas, treinamentos_das_turmas,
                     SIT_ATRASADA, SIT_EM_BREVE, SIT_PAGA, STATUS_PAGA, TIPO_CARTAO, TIPO_PIX,
                     TREINAMENTOS, agenda, conferir_total, datas_continuas, data_br, filtrar,
@@ -1286,7 +1286,7 @@ def tela_nova():
         _limpar_campos("ct_")
         _ir("cartao")
     if _cartao_inicio("hm_hibrido", "tq_hibrido", "Cobrança híbrida", "claro", SVG_HIBRIDO,
-                      "Cobrança híbrida", "Uma parte no Pix, outra no cartão"):
+                      "Cobrança híbrida", "Juntar Pix, cartão e permuta"):
         _limpar_campos("hb_")
         _ir("hibrido")
     if _cartao_inicio("hm_permuta", "tq_permuta", "Permuta", "claro", SVG_PERMUTA,
@@ -1318,14 +1318,14 @@ def _usar_telefone(prefixo: str, tel: str):
     st.session_state[f"{prefixo}{CHAVE_TEL}"] = tel
 
 
-def _bloco_cliente(prefixo: str):
+def _bloco_cliente(prefixo: str, numero: int = 1):
     """
     Cliente + turma(s): o treinamento sai da letra de cada turma. A cobrança pode valer para mais
     de uma turma (pedido 16/10): o botão "Adicionar outra turma" abre mais um campo embaixo.
     Devolve (cliente, turma, treino, erros), com turma e treino já como vão para a planilha
     ("L345" e "LORAP", ou "L345, V12" e "LORAP, Vendas").
     """
-    _titulo_secao(1, "Cliente")
+    _titulo_secao(numero, "Cliente")
     cliente = st.text_input("Nome do cliente", key=f"{prefixo}cliente").strip()
     turmas, erros = [], []
     # Telefone opcional (pedido 26/10), para facilitar falar com a pessoa. Vai junto no
@@ -1906,94 +1906,195 @@ def tela_cartao():
     _aviso_do_salvar("ct_")
 
 
-# ── Cobrança híbrida (uma parte no Pix, outra no cartão) ──────────────────────
+# ── Cobrança híbrida (duas ou três formas: Pix, cartão e permuta) ─────────────
+# Pedido 06/11: no topo a pessoa marca QUAIS formas o cliente usa (pelo menos duas; vem marcado
+# Pix + cartão, como sempre foi) e só aparecem os blocos delas. A parte da permuta tem os mesmos
+# campos da tela Permuta (valores com data e retiradas) e vira as mesmas linhas de uma permuta,
+# dentro da mesma cobrança.
+
+ROTULO_FORMA = {TIPO_PIX: "Pix", TIPO_CARTAO: "Cartão de crédito", TIPO_PERMUTA: "Permuta"}
+_NA_FORMA = {TIPO_PIX: "no Pix", TIPO_CARTAO: "no cartão", TIPO_PERMUTA: "na permuta"}
+_ARTIGO_FORMA = {TIPO_PIX: "o Pix", TIPO_CARTAO: "o cartão", TIPO_PERMUTA: "a permuta"}
+_CHAVE_PARTE = {TIPO_PIX: "hb_v_pix", TIPO_CARTAO: "hb_v_cartao", TIPO_PERMUTA: "hb_v_perm"}
+
+
+def _lista_e(itens: list, conectivo: str = "e") -> str:
+    """['o Pix', 'o cartão', 'a permuta'] → 'o Pix, o cartão e a permuta'."""
+    return itens[0] if len(itens) == 1 else f"{', '.join(itens[:-1])} {conectivo} {itens[-1]}"
+
+
+def _resumo_parte_permuta(creditos: list, retiradas: list) -> list:
+    """Linhas do resumo da parte na permuta: cada valor com a data, as retiradas e o saldo."""
+    if not creditos:
+        return []
+    total = sum(v for _, v in creditos)
+    if len(creditos) > 1:
+        linhas = [f"{data_br(d)} · valor de {formatar_brl(v)}" for d, v in sorted(creditos)]
+    else:
+        linhas = [f"Valor de {formatar_brl(total)} em {data_br(creditos[0][0])}"]
+    for produto, d, v in sorted(retiradas, key=lambda r: r[1]):
+        linhas.append(f"{data_br(d)} · retirada · {_e(produto)} · {formatar_brl(v)}")
+    if not retiradas:
+        linhas.append("Nenhuma retirada ainda")
+    saldo = (centavos(total) - centavos(sum(v for _, _, v in retiradas))) / 100
+    linhas.append(f"Saldo para retirar: <b>{formatar_brl(saldo)}</b>" if saldo >= 0
+                  else f":warning: As retiradas passam do total da permuta em <b>{formatar_brl(-saldo)}</b>")
+    return linhas
+
 
 def tela_hibrido():
     hoje = _hoje()
-    _cabecalho("Cobrança híbrida", voltar_para="nova", subtitulo="Uma parte no Pix e outra no cartão")
+    _cabecalho("Cobrança híbrida", voltar_para="nova", subtitulo="Marque as formas que o cliente vai usar")
+    num = iter(range(1, 20))   # os blocos são numerados na ordem em que aparecem
+    with st.container(key="sec_hb0"):
+        _titulo_secao(next(num), "Formas de pagamento")
+        escolhidas = st.pills("Formas de pagamento", FORMAS_HIBRIDO, selection_mode="multi",
+                              default=[TIPO_PIX, TIPO_CARTAO], key="hb_formas", format_func=ROTULO_FORMA.get,
+                              label_visibility="collapsed")
+        formas = [f for f in FORMAS_HIBRIDO if f in (escolhidas or [])]   # sempre na mesma ordem
+        if len(formas) < 2:
+            _erro_campo("Marque pelo menos duas formas. Se é tudo de um jeito só, use a cobrança Pix, "
+                        "a cobrança cartão ou a permuta.")
+        else:
+            st.caption("Toque para marcar ou desmarcar. Só aparecem os blocos das formas marcadas.")
     with st.container(key="sec_hb1"):
-        cliente, turma, treino, erros = _bloco_cliente("hb_")
+        cliente, turma, treino, erros = _bloco_cliente("hb_", numero=next(num))
+    if len(formas) < 2:
+        erros.append("Marque pelo menos duas formas de pagamento (ex.: Pix e permuta).")
 
-    parte_pix = parte_cartao = 0.0
-    with st.container(key="sec_hb2"):
-        _titulo_secao(2, "Valores")
-        total, ok_t = _valor("Valor total", "hb_total")
-        ajuda = "Preencha um dos dois: o outro é o que sobra do total."
-        v_pix, ok_x = _valor("Quanto vai no Pix", "hb_v_pix", placeholder="em branco = o resto", help=ajuda)
-        v_cartao, ok_c = _valor("Quanto vai no cartão", "hb_v_cartao", placeholder="em branco = o resto",
-                                help=ajuda)
-        if not (ok_t and ok_x and ok_c):
-            erros.append("Tem valor digitado errado.")
-        if total is None or total <= 0:
-            erros.append("Falta o valor total.")
-        elif v_pix is None and v_cartao is None:
-            erros.append("Falta dizer quanto vai no Pix ou quanto vai no cartão.")
-        else:
-            if v_pix is None:
-                v_pix = (centavos(total) - centavos(v_cartao)) / 100
-            elif v_cartao is None:
-                v_cartao = (centavos(total) - centavos(v_pix)) / 100
-            if v_pix <= 0 or v_cartao <= 0:
-                erros.append("O Pix e o cartão precisam ter valor, e nenhum pode passar do total. "
-                             "Se é tudo de um jeito só, use a cobrança Pix ou a cobrança cartão.")
-                _erro_campo("O Pix e o cartão precisam ter valor, e nenhum pode passar do total.")
+    partes = {f: 0.0 for f in FORMAS_HIBRIDO}   # quanto vai em cada forma (0 = ainda não dá para saber)
+    total = None
+    if len(formas) >= 2:
+        with st.container(key="sec_hb2"):
+            _titulo_secao(next(num), "Valores")
+            total, ok_t = _valor("Valor total", "hb_total")
+            ajuda = ("Preencha um dos dois: o outro é o que sobra do total." if len(formas) == 2
+                     else "Deixe uma em branco: ela fica com o que sobra do total.")
+            digitado, tudo_ok = {}, ok_t
+            for f in formas:
+                digitado[f], ok = _valor(f"Quanto vai {_NA_FORMA[f]}", _CHAVE_PARTE[f],
+                                         placeholder="em branco = o resto", help=ajuda)
+                tudo_ok = tudo_ok and ok
+            if not tudo_ok:
+                erros.append("Tem valor digitado errado.")
+            vazias = [f for f in formas if digitado[f] is None]
+            if total is None or total <= 0:
+                erros.append("Falta o valor total.")
+            elif len(vazias) > 1:
+                if len(formas) == 2:   # (o texto de sempre do Pix + cartão)
+                    erros.append(f"Falta dizer quanto vai {_NA_FORMA[formas[0]]} ou quanto vai {_NA_FORMA[formas[1]]}.")
+                else:
+                    erros.append(f"Falta dizer quanto vai {_lista_e([_NA_FORMA[f] for f in vazias], 'ou')} "
+                                 "(só uma pode ficar em branco: ela fica com o resto).")
             else:
-                parte_pix, parte_cartao = v_pix, v_cartao
-                _info(f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(v_pix)}</b> &nbsp;+&nbsp; "
-                      f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(v_cartao)}</b>")
+                if vazias:
+                    outras = sum(centavos(digitado[f]) for f in formas if f != vazias[0])
+                    digitado[vazias[0]] = (centavos(total) - outras) / 100
+                if any(digitado[f] <= 0 for f in formas):
+                    quais = _lista_e([_ARTIGO_FORMA[f] for f in formas])
+                    curto = f"{quais[0].upper()}{quais[1:]} precisam ter valor, e nenhuma parte pode passar do total."
+                    erros.append(f"{curto} Se é tudo de um jeito só, use a cobrança Pix, a cobrança cartão ou a permuta.")
+                    _erro_campo(curto)
+                else:
+                    partes.update(digitado)
+                    # cada etiqueta fica junto do seu valor ("R$" nunca sozinho no fim da linha)
+                    _info(" &nbsp;+&nbsp; ".join(f"<span style='white-space:nowrap'>{_chip_tipo(f)} "
+                                                 f"<b>{formatar_brl(partes[f])}</b></span>" for f in formas))
 
-    data_entrada, valores_px, datas_px, pix_pagas = None, [], [], []
-    with st.container(key="sec_hb3"):
-        _titulo_secao(3, "Parte no Pix")
-        entrada, ok_e = _valor("Valor de entrada", "hb_entrada", placeholder="0,00 se não teve entrada",
-                               help="O que entra primeiro no Pix. Se o Pix foi pago de uma vez só, "
-                                    "coloque aqui a parte inteira do Pix.")
-        entrada = entrada or 0.0
-        if entrada > 0:
-            data_entrada = st.date_input("Data da entrada", value=hoje, format="DD/MM/YYYY",
-                                         key="hb_dt_entrada",
-                                         help="O dia em que a pessoa pagou a entrada.")
-        if not ok_e:
-            erros.append("Tem valor digitado errado.")
-        if parte_pix and centavos(entrada) > centavos(parte_pix):
-            erros.append("A entrada é maior que a parte do Pix.")
-        if parte_pix and centavos(entrada) == centavos(parte_pix):
-            _info("O Pix fica todo na entrada, sem parcelas.")
-        else:
-            valores_px, datas_px = _bloco_parcelas_pix("hb_px_", max(parte_pix - entrada, 0), total,
-                                                       mes_mais(data_entrada or hoje, 1), erros)
-            pix_pagas = _caixas_ja_pagas("hb_px_", valores_px, datas_px, hoje)
+    data_entrada, entrada, valores_px, datas_px, pix_pagas = None, 0.0, [], [], []
+    if TIPO_PIX in formas and len(formas) >= 2:
+        parte_pix = partes[TIPO_PIX]
+        with st.container(key="sec_hb3"):
+            _titulo_secao(next(num), "Parte no Pix")
+            entrada, ok_e = _valor("Valor de entrada", "hb_entrada", placeholder="0,00 se não teve entrada",
+                                   help="O que entra primeiro no Pix. Se o Pix foi pago de uma vez só, "
+                                        "coloque aqui a parte inteira do Pix.")
+            entrada = entrada or 0.0
+            if entrada > 0:
+                data_entrada = st.date_input("Data da entrada", value=hoje, format="DD/MM/YYYY",
+                                             key="hb_dt_entrada",
+                                             help="O dia em que a pessoa pagou a entrada.")
+            if not ok_e:
+                erros.append("Tem valor digitado errado.")
+            if parte_pix and centavos(entrada) > centavos(parte_pix):
+                erros.append("A entrada é maior que a parte do Pix.")
+            if parte_pix and centavos(entrada) == centavos(parte_pix):
+                _info("O Pix fica todo na entrada, sem parcelas.")
+            else:
+                valores_px, datas_px = _bloco_parcelas_pix("hb_px_", max(parte_pix - entrada, 0), total,
+                                                           mes_mais(data_entrada or hoje, 1), erros)
+                pix_pagas = _caixas_ja_pagas("hb_px_", valores_px, datas_px, hoje)
 
-    with st.container(key="sec_hb4"):
-        _titulo_secao(4, "Parte no cartão")
-        st.caption("Uma data para cada vez que o cartão passa. Se já passou, coloque o dia em que passou.")
-        valores_ct, datas_ct, vezes, passou = _bloco_passadas_cartao("hb_ct_", parte_cartao, total, erros,
-                                                                    hoje=hoje)
+    valores_ct, datas_ct, vezes, passou = [], [], [], []
+    if TIPO_CARTAO in formas and len(formas) >= 2:
+        with st.container(key="sec_hb4"):
+            _titulo_secao(next(num), "Parte no cartão")
+            st.caption("Uma data para cada vez que o cartão passa. Se já passou, coloque o dia em que passou.")
+            valores_ct, datas_ct, vezes, passou = _bloco_passadas_cartao("hb_ct_", partes[TIPO_CARTAO], total,
+                                                                        erros, hoje=hoje)
+
+    creditos, retiradas = [], []
+    if TIPO_PERMUTA in formas and len(formas) >= 2:
+        # os mesmos campos da tela Permuta: valores (com data) e retiradas (opcionais)
+        with st.container(key="sec_hb_pm"):
+            _titulo_secao(next(num), "Parte na permuta")
+            st.markdown("<div class='px-lista'>Valores da permuta</div>", unsafe_allow_html=True)
+            creditos = _bloco_valores_permuta("hb_pm_", hoje, erros, a_dividir=partes[TIPO_PERMUTA])
+            st.markdown("<div class='px-lista'>Retiradas</div>", unsafe_allow_html=True)
+            st.caption("O que vocês já pegaram da empresa. Se ainda não pegaram nada, deixe em branco: "
+                       "dá para anotar depois, na ficha da cobrança.")
+            retiradas = _bloco_retiradas("hb_pm_", hoje, erros)
+            if creditos:
+                st.markdown(_html_saldo(sum(v for _, v in creditos), sum(v for _, _, v in retiradas)),
+                            unsafe_allow_html=True)
+    total_pm = sum(v for _, v in creditos)
+    retirado = sum(v for _, _, v in retiradas)
 
     confirmado = True
     with st.container(key="sec_hb5"):
-        _titulo_secao(5, "Resumo")
+        _titulo_secao(next(num), "Resumo")
         # Aparece assim que o total está dividido (pedido 21/10): a parte ainda não preenchida
         # fica com "falta preencher", para dar para conferir enquanto preenche.
-        linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False, pagas=pix_pagas)
-        linhas_ct = _resumo_cartao(0, valores_ct, datas_ct, vezes, passou, com_fim=False, cabecalho=False)
-        if parte_pix:
-            soma_px = entrada + sum(valores_px) if linhas_px else parte_pix
-            soma_ct = sum(valores_ct) if valores_ct else parte_cartao
-            linhas = [f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(soma_px)}</b>"]
-            linhas += linhas_px or ["<b>Falta preencher</b> a parte do Pix"]
-            linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(soma_ct)}</b>")
-            linhas += linhas_ct or ["<b>Falta preencher</b> a parte do cartão"]
-            if linhas_px and valores_ct and all(datas_ct):
-                fim = max([d for d in datas_px if d] + datas_ct + ([data_entrada] if data_entrada else []))
-                linhas.append(f"A cobrança vai até <b>{nome_mes(fim)}</b>")
-            _info("<br>".join(linhas))
-            if linhas_px and valores_ct:
-                confirmado = _bloco_conferencia(total, [entrada] + valores_px + valores_ct, "hb_")
-            _info("O Telegram avisa vocês 1 dia antes de cada data, no dia, "
-                  "e todo dia enquanto estiver atrasado.", "cx-nota")
+        if len(formas) < 2:
+            st.caption("Marque pelo menos duas formas de pagamento para ver o resumo.")
+        elif not any(partes[f] for f in formas):
+            st.caption(f"Preencha o valor total e quanto vai {_lista_e([_NA_FORMA[f] for f in formas], 'ou')} "
+                       "para ver o resumo.")
         else:
-            st.caption("Preencha o valor total e quanto vai no Pix ou no cartão para ver o resumo.")
+            linhas, prontas = [], True
+            linhas_px, linhas_ct = [], []
+            if TIPO_PIX in formas:
+                linhas_px = _resumo_pix(entrada, data_entrada, valores_px, datas_px, hoje, com_fim=False,
+                                        pagas=pix_pagas)
+                soma_px = entrada + sum(valores_px) if linhas_px else partes[TIPO_PIX]
+                linhas.append(f"{_chip_tipo(TIPO_PIX)} <b>{formatar_brl(soma_px)}</b>")
+                linhas += linhas_px or ["<b>Falta preencher</b> a parte do Pix"]
+                prontas = prontas and bool(linhas_px)
+            if TIPO_CARTAO in formas:
+                linhas_ct = _resumo_cartao(0, valores_ct, datas_ct, vezes, passou, com_fim=False, cabecalho=False)
+                soma_ct = sum(valores_ct) if valores_ct else partes[TIPO_CARTAO]
+                linhas.append(f"{_chip_tipo(TIPO_CARTAO)} <b>{formatar_brl(soma_ct)}</b>")
+                linhas += linhas_ct or ["<b>Falta preencher</b> a parte do cartão"]
+                prontas = prontas and bool(valores_ct)
+            if TIPO_PERMUTA in formas:
+                linhas_pm = _resumo_parte_permuta(creditos, retiradas)
+                linhas.append(f"{_chip_tipo(TIPO_PERMUTA)} <b>{formatar_brl(total_pm or partes[TIPO_PERMUTA])}</b>")
+                linhas += linhas_pm or ["<b>Falta preencher</b> a parte da permuta"]
+                prontas = prontas and bool(creditos)
+            # até quando vai = a última data do DINHEIRO (a permuta não tem data para cobrar)
+            if prontas and all(datas_ct) and (TIPO_PIX not in formas or linhas_px):
+                datas_din = [d for d in datas_px if d] + list(datas_ct) + ([data_entrada] if data_entrada else [])
+                if datas_din:
+                    linhas.append(f"A cobrança vai até <b>{nome_mes(max(datas_din))}</b>")
+            _info("<br>".join(linhas))
+            if prontas:
+                confirmado = _bloco_conferencia(total, [entrada] + valores_px + valores_ct + [v for _, v in creditos],
+                                                "hb_")
+            nota = "O Telegram avisa vocês 1 dia antes de cada data, no dia, e todo dia enquanto estiver atrasado."
+            if TIPO_PERMUTA in formas:
+                nota += (" A parte da permuta não entra no Recebido nem no A receber, e o Telegram não avisa: "
+                         "ela tem o próprio saldo.")
+            _info(nota, "cx-nota")
 
     obs_hb = st.text_input("Observação (opcional)", key="hb_obs", max_chars=300,
                            placeholder="Ex.: cartão do marido")
@@ -2001,6 +2102,8 @@ def tela_hibrido():
                  icon=":material/check:"):
         if not confirmado:
             erros.append("O valor não fecha com o total: confira ou marque a caixa acima.")
+        if total_pm and centavos(retirado) > centavos(total_pm):
+            erros.append("As retiradas passam do total da permuta.")
         if erros:
             st.error("\n".join(f"- {e}" for e in dict.fromkeys(erros)))
         else:
@@ -2008,7 +2111,8 @@ def tela_hibrido():
             _salvar(TIPO_HIBRIDO, cliente, turma, treino, total,
                     parcelas_hibrido(entrada, data_entrada, valores_px, datas_px,
                                      [v for _, v, _, _ in ordem], [d for d, _, _, _ in ordem],
-                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje, pix_pagas),
+                                     [x for _, _, x, _ in ordem], [ok for _, _, _, ok in ordem], hoje, pix_pagas,
+                                     creditos=creditos, retiradas=retiradas, quem=_usuario()),
                     "hb_", obs_hb)
     _aviso_do_salvar("hb_")
 
@@ -2042,13 +2146,17 @@ def _tirar_linha(prefixo: str, contador: str, campos: tuple, i: int):
     ss[f"{prefixo}{contador}"] = max(n - 1, 1)
 
 
-def _bloco_valores_permuta(prefixo: str, hoje: date, erros: list) -> list:
+def _bloco_valores_permuta(prefixo: str, hoje: date, erros: list, a_dividir: float | None = None) -> list:
     """
     Cada valor de permuta que entrou, com a data dele, e o "+" para mais um (a mesma pessoa pode
     fechar outra permuta depois). Devolve [(data, valor)].
+    `a_dividir` (cobrança híbrida): a parte da permuta já dita em "Valores"; os campos vêm
+    preenchidos com ela, como as parcelas do Pix e as passadas do cartão (_valores_automaticos).
     """
     valores = []
     n = st.session_state.get(f"{prefixo}n_cred", 1)
+    if a_dividir is not None:
+        _valores_automaticos([f"{prefixo}cval_{i}" for i in range(n)], a_dividir)
     for i in range(n):
         with st.container(key=f"{prefixo}cred_{i}"):
             if n > 1:
@@ -2200,10 +2308,10 @@ def _chip_sit(sit: str) -> str:
 
 
 def _chip_situacao(c: dict) -> str:
-    """Situação da cobrança; a permuta tem a dela: com saldo ou saldo zerado."""
+    """Situação da cobrança; a permuta tem a dela: com saldo ou saldo zerado. A híbrida com parte
+    na permuta segue o dinheiro (Pix e cartão); o saldo da permuta aparece à parte."""
     if c.get("permuta"):
-        return ("<span class='sit c-ok'>Com saldo</span>" if c["saldo"] > 0.005
-                else "<span class='sit c-neutro'>Saldo zerado</span>")
+        return _chip_saldo(c)
     return _chip_sit(c["situacao"])
 
 
@@ -2214,6 +2322,35 @@ def _chip_tipo(tipo: str) -> str:
     """Etiqueta da forma de pagamento: Pix azul, Cartão rosa (para bater o olho e diferenciar);
     Híbrido é metade de cada cor."""
     return f"<span class='tp {_CLASSE_TIPO.get(tipo, 'tp-pix')}'>{_e(tipo)}</span>"
+
+
+# Híbrida: uma faixa da cor de cada forma que ela tem (Pix azul, Cartão rosa, Permuta verde-água)
+_CLASSE_HIBRIDA = {(TIPO_PIX, TIPO_CARTAO): "tp-hib", (TIPO_PIX, TIPO_PERMUTA): "tp-hib hb-px-pm",
+                   (TIPO_CARTAO, TIPO_PERMUTA): "tp-hib hb-ct-pm",
+                   (TIPO_PIX, TIPO_CARTAO, TIPO_PERMUTA): "tp-hib hb-tres"}
+
+
+def _chip_cobranca(c: dict) -> str:
+    """Etiqueta da cobrança inteira: na híbrida, as cores das formas que ela tem (2 ou 3 faixas)."""
+    if c["tipo"] != TIPO_HIBRIDO:
+        return _chip_tipo(c["tipo"])
+    classe = _CLASSE_HIBRIDA.get(tuple(c.get("formas") or ()), "tp-hib")
+    return f"<span class='tp {classe}'>{_e(TIPO_HIBRIDO)}</span>"
+
+
+def _nome_tipo(c: dict) -> str:
+    """'Híbrido (Pix + permuta)' na híbrida; 'Pix', 'Cartão' ou 'Permuta' nas outras."""
+    if not c["hibrida"]:
+        return c["tipo"]
+    nomes = {TIPO_PIX: "Pix", TIPO_CARTAO: "cartão", TIPO_PERMUTA: "permuta"}
+    return f"{TIPO_HIBRIDO} ({' + '.join(nomes[f] for f in c['formas'])})"
+
+
+def _saldo_permuta_curto(c: dict) -> str:
+    """O saldo da parte na permuta de uma híbrida, curtinho, para o cartão do relatório."""
+    if c["saldo"] > 0.005:
+        return f"<span class='cc-sp'>saldo <b>{formatar_brl(c['saldo'])}</b></span>"
+    return "<span class='cc-sp'>saldo zerado</span>"
 
 
 def _linha_estado(c: dict, hoje: date) -> str:
@@ -2228,8 +2365,9 @@ def _linha_estado(c: dict, hoje: date) -> str:
     if p:
         apelido = (" (hoje)" if p["vencimento"] == hoje
                    else " (amanhã)" if p["vencimento"] == hoje + timedelta(days=1) else "")
-        # na híbrida, diz de que forma é a próxima (umas são Pix, outras cartão)
-        forma = f" · no {'cartão' if p['tipo'] == TIPO_CARTAO else 'Pix'}" if c["hibrida"] else ""
+        # na híbrida com Pix E cartão, diz de que forma é a próxima (umas são Pix, outras cartão)
+        dinheiro = [f for f in c.get("formas", []) if f in FORMAS]
+        forma = f" · no {'cartão' if p['tipo'] == TIPO_CARTAO else 'Pix'}" if len(dinheiro) > 1 else ""
         return f"Próxima: <b>{data_br(p['vencimento'])}</b>{apelido} · {formatar_brl(p['valor'])}{forma}"
     return ""
 
@@ -2250,11 +2388,13 @@ def _html_cliente(c: dict, hoje: date) -> str:
     else:
         valor = (f"pago <b>{formatar_brl(c['pago'])}</b>" if quitado
                  else f"falta <b>{formatar_brl(c['falta'])}</b>")
+        if c.get("com_permuta"):   # híbrida com parte na permuta: o saldo dela ao lado (pedido 06/11)
+            valor += f" · {_saldo_permuta_curto(c)}"
         estado = "" if quitado else f"<div class='cc-est'>{_linha_estado(c, hoje)}</div>"
     return (
         f"<div class='cc {COR_CLI[c['situacao']]}'>"
         f"<div class='cc-l1'><span class='cc-nome'>{_e(c['cliente'])}</span>{nota}"
-        f"{_chip_tipo(c['tipo'])}{_chip_situacao(c)}</div>"
+        f"{_chip_cobranca(c)}{_chip_situacao(c)}</div>"
         f"<div class='cc-l2'><span class='cc-turma'>{_e(local_da_cobranca(c))}</span>"
         f"<span class='cc-val'>{valor}</span></div>{estado}"
         f"<i class='cc-pg' style='width:{pct}%'></i></div>"
@@ -2680,8 +2820,10 @@ def _dlg_adicionar(cid: str):
         return
     k = f"_ad_{cid}"
     ultima = c["ultima"] or _hoje()
-    # Vem na forma da cobrança; escolher a outra é o que torna a cobrança híbrida
-    padrao = c["tipo"] if c["tipo"] in FORMAS else TIPO_PIX
+    # Vem na forma da cobrança (na híbrida com uma forma de dinheiro só, ex. cartão + permuta, vem
+    # nela); escolher a outra é o que torna a cobrança híbrida
+    dinheiro = [f for f in c.get("formas", []) if f in FORMAS]
+    padrao = dinheiro[0] if len(dinheiro) == 1 else (c["tipo"] if c["tipo"] in FORMAS else TIPO_PIX)
     forma = st.radio("Forma de pagamento", FORMAS, index=FORMAS.index(padrao), horizontal=True,
                      key=f"{k}_forma")
     data = st.date_input("Data", value=mes_mais(ultima, 1) if forma == TIPO_PIX else None,
@@ -2781,7 +2923,7 @@ def _dlg_excluir(cid: str):
     c = _cobranca(cid)
     if not c:
         return
-    _info(f"Excluir a cobrança de <b>{_e(c['cliente'])}</b> ({_e(c['turma'])} · {_e(c['tipo'])})?<br>"
+    _info(f"Excluir a cobrança de <b>{_e(c['cliente'])}</b> ({_e(c['turma'])} · {_e(_nome_tipo(c))})?<br>"
           "Ela some do relatório e dos avisos. Dá para restaurar em "
           "<b>Cobranças excluídas</b>, na tela inicial.", "cx-perigo")
     c1, c2 = st.columns(2)
@@ -2831,14 +2973,16 @@ def tela_cobranca():
         st.info("Essa cobrança não está mais disponível.")
         return
     _cabecalho(c["cliente"], voltar_para=volta,
-               subtitulo=f"Turma {_e(local_da_cobranca(c))} · {_e(c['tipo'])}")
+               subtitulo=f"Turma {_e(local_da_cobranca(c))} · {_e(_nome_tipo(c))}")
     _contato(c)
     if c["permuta"]:
         _ficha_permuta(c)
         return
 
-    total = c["pago"] + c["falta"]
-    pct = _pct(c["pago"], total)
+    dinheiro_total = c["pago"] + c["falta"]
+    # Total = o combinado de tudo: o dinheiro (Pix e cartão) + a parte na permuta, se tiver (pedido 06/11)
+    total = dinheiro_total + (c["total_permuta"] if c["com_permuta"] else 0.0)
+    pct = _pct(c["pago"], dinheiro_total)
     selo = "<span class='sit c-ok'>Quitado</span>" if c["situacao"] == CLI_QUITADO else _chip_sit(c["situacao"])
     ate = f"Vai até <b>{nome_mes(c['ultima'])}</b>" if c["ultima"] else ""
     quem = ""
@@ -2849,14 +2993,23 @@ def tela_cobranca():
     aviso_total = ""
     if c["valor_total"] and abs(conferir_total(c["valor_total"], [total])) >= 0.005:
         aviso_total = (f"<div class='fc-aviso'>O total combinado é {formatar_brl(c['valor_total'])}, "
-                       f"mas as parcelas somam {formatar_brl(total)}.</div>")
-    # Híbrida: quanto é de cada forma e quanto de cada uma já entrou
+                       f"mas as {'partes' if c['com_permuta'] else 'parcelas'} somam {formatar_brl(total)}.</div>")
+    # Híbrida: quanto é de cada forma e quanto de cada uma já entrou (a permuta: retirado e saldo)
     formas = ""
     if c["hibrida"]:
-        formas = "<div class='fc-formas'>" + "".join(
-            f"<div>{_chip_tipo(f)}<span>{verbo} <b>{formatar_brl(c['por_forma'][f]['pago'])}</b> "
-            f"de {formatar_brl(c['por_forma'][f]['total'])}</span></div>"
-            for f, verbo in ((TIPO_PIX, "pago"), (TIPO_CARTAO, "passou"))) + "</div>"
+        itens = []
+        for f in c["formas"]:
+            pf = c["por_forma"][f]
+            if f == TIPO_PERMUTA:
+                brl = lambda v: formatar_brl(v).replace(" ", "&nbsp;")   # "R$" nunca sozinho no fim da linha
+                itens.append(f"<div>{_chip_tipo(f)}<span>retirado <b>{brl(pf['pago'])}</b> de "
+                             f"{brl(pf['total'])} · saldo <b>{brl(max(pf['saldo'], 0))}</b>"
+                             "</span></div>")
+            else:
+                verbo = "passou" if f == TIPO_CARTAO else "pago"
+                itens.append(f"<div>{_chip_tipo(f)}<span>{verbo} <b>{formatar_brl(pf['pago'])}</b> "
+                             f"de {formatar_brl(pf['total'])}</span></div>")
+        formas = "<div class='fc-formas'>" + "".join(itens) + "</div>"
     st.markdown(
         f"<div class='fc {COR_CLI[c['situacao']]}'><div class='fc-topo'>{selo}<span>{ate}</span></div>"
         # Total da cobrança (pedido 03/11): facilita para quem vai cobrar
@@ -2870,10 +3023,12 @@ def tela_cobranca():
     )
     _bloco_obs_ficha(c)
 
-    if c["hibrida"]:
-        # Um bloco para cada forma: primeiro tudo que é Pix, depois tudo que é cartão
-        for forma, titulo in ((TIPO_PIX, "No Pix"), (TIPO_CARTAO, "No cartão")):
-            st.markdown(f"<div class='fc-grupo'>{titulo}</div>", unsafe_allow_html=True)
+    dinheiro = [f for f in c["formas"] if f in FORMAS]
+    if c["hibrida"] or c["com_permuta"]:
+        # Um bloco para cada forma: primeiro tudo que é Pix, depois tudo que é cartão; a permuta no fim
+        for forma in dinheiro:
+            st.markdown(f"<div class='fc-grupo'>{'No cartão' if forma == TIPO_CARTAO else 'No Pix'}</div>",
+                        unsafe_allow_html=True)
             for p in c["parcelas"]:
                 if p["tipo"] == forma:
                     _parcela_ui(p, c, hoje, contexto="fc")
@@ -2881,10 +3036,18 @@ def tela_cobranca():
         for p in c["parcelas"]:
             _parcela_ui(p, c, hoje, contexto="fc")
 
-    rot_add = {TIPO_CARTAO: "Adicionar data", TIPO_HIBRIDO: "Adicionar parcela ou data"}.get(
-        c["tipo"], "Adicionar parcela")
+    if not dinheiro and c["tipo"] in FORMAS:
+        dinheiro = [c["tipo"]]
+    rot_add = ("Adicionar parcela ou data" if len(dinheiro) > 1 else
+               "Adicionar data" if dinheiro == [TIPO_CARTAO] else "Adicionar parcela")
     if st.button(rot_add, key="fc_add", icon=":material/add:", use_container_width=True):
         _dlg_adicionar(c["id"])
+
+    if c["com_permuta"]:
+        # Parte na permuta da híbrida (pedido 06/11): o saldo dela, cada valor e cada retirada
+        st.markdown("<div class='fc-grupo'>Na permuta</div>", unsafe_allow_html=True)
+        st.markdown(_html_numeros_permuta(c), unsafe_allow_html=True)
+        _listas_permuta(c, classe_titulo="px-lista")
     _botoes_editar_excluir(c)
 
 
@@ -2933,33 +3096,63 @@ def _html_valor_permuta(d, valor: float, quem: str = "") -> str:
             f"<div class='pc-valor'>+ {formatar_brl(valor)}</div></div></div>")
 
 
+def _chip_saldo(c: dict) -> str:
+    """Situação da permuta (inteira ou a parte de uma híbrida): com saldo ou saldo zerado."""
+    return ("<span class='sit c-ok'>Com saldo</span>" if c["saldo"] > 0.005
+            else "<span class='sit c-neutro'>Saldo zerado</span>")
+
+
+def _html_numeros_permuta(c: dict, rodape: str = "") -> str:
+    """Cartão com Total da permuta, Retirado e Saldo (na permuta inteira e na parte de uma híbrida)."""
+    total, retirado, saldo = c["total_permuta"], c["retirado"], c["saldo"]
+    aviso = (f"<div class='fc-aviso'>As retiradas passam do total da permuta em {formatar_brl(-saldo)}.</div>"
+             if saldo < -0.005 else "")
+    n_ret = len(c["retiradas"])
+    return (
+        f"<div class='fc {'c-ok' if saldo > 0.005 else 'c-neutro'}'><div class='fc-topo'>{_chip_saldo(c)}"
+        f"<span>{n_ret} retirada{'s' if n_ret != 1 else ''}</span></div>"
+        f"<div class='pg'><i style='width:{_pct(retirado, total)}%'></i></div>"
+        f"<div class='fc-nums fc-perm'><div><b>{formatar_brl(total)}</b><span>Total da permuta</span></div>"
+        f"<div><b>{formatar_brl(retirado)}</b><span>Retirado</span></div>"
+        f"<div><b>{formatar_brl(max(saldo, 0))}</b><span>Saldo</span></div>"
+        f"</div>{aviso}{rodape}</div>"
+    )
+
+
 def _ficha_permuta(c: dict):
     """Total (soma dos valores), retirado e saldo; cada valor com a data e cada retirada."""
-    total = c["total_permuta"]
-    retirado, saldo = c["pago"], c["saldo"]
-    pct = _pct(retirado, total)
     quem = ""
     if c["criada_por"] or c["criada_em"]:
         por = f" por <b>{_e(c['criada_por'])}</b>" if c["criada_por"] else ""
         em = f" em {data_br(c['criada_em'])}" if c["criada_em"] else ""
         quem = f"<div class='fc-quem'>Cadastrada{por}{em}</div>"
-    aviso = (f"<div class='fc-aviso'>As retiradas passam do total da permuta em {formatar_brl(-saldo)}.</div>"
-             if saldo < -0.005 else "")
-    n_ret = len(c["retiradas"])
-    st.markdown(
-        f"<div class='fc {'c-ok' if saldo > 0.005 else 'c-neutro'}'><div class='fc-topo'>{_chip_situacao(c)}"
-        f"<span>{n_ret} retirada{'s' if n_ret != 1 else ''}</span></div>"
-        f"<div class='pg'><i style='width:{pct}%'></i></div>"
-        f"<div class='fc-nums fc-perm'><div><b>{formatar_brl(total)}</b><span>Total da permuta</span></div>"
-        f"<div><b>{formatar_brl(retirado)}</b><span>Retirado</span></div>"
-        f"<div><b>{formatar_brl(max(saldo, 0))}</b><span>Saldo</span></div>"
-        f"</div>{aviso}{quem}</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(_html_numeros_permuta(c, quem), unsafe_allow_html=True)
     _bloco_obs_ficha(c)
+    _listas_permuta(c, classe_titulo="fc-grupo")
 
+    # permuta do mesmo cliente cadastrada à parte (antes do "+" dos valores existir)
+    saldo = c["saldo"]
+    outras = permutas_do_cliente(_cobrancas() or [], c["cliente"], menos=c["id"])
+    if outras:
+        st.markdown(f"<div class='fc-grupo'>Outras permutas de {_e(c['cliente'])}</div>", unsafe_allow_html=True)
+        soma = sum(max(x["saldo"], 0) for x in outras) + max(saldo, 0)
+        _info(f"Somando as {len(outras) + 1} permutas: <b>{formatar_brl(soma)}</b> de saldo para retirar.")
+        for x in sorted(outras, key=lambda x: x["criada_em"] or date.min):
+            if _cartao_toque(f"cc_{x['id']}", f"tq_{x['id']}", f"Abrir permuta de {x['cliente']}",
+                             _html_cliente(x, _hoje())):
+                _abrir_cobranca(x["id"], st.session_state.get("cob_volta", "relatorio"))
+    _botoes_editar_excluir(c)
+
+
+def _listas_permuta(c: dict, classe_titulo: str):
+    """
+    Valores da permuta (cada um com a data, Alterar e "Adicionar valor") e Retiradas (Alterar e
+    "Adicionar retirada"). Na ficha da permuta os títulos são grandes (fc-grupo); dentro do bloco
+    "Na permuta" de uma híbrida, pequenos (px-lista).
+    """
+    total, saldo = c["total_permuta"], c["saldo"]
     # cada valor que entrou, com a data (a pessoa pode fechar outra permuta depois)
-    st.markdown("<div class='fc-grupo'>Valores da permuta</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='{classe_titulo}'>Valores da permuta</div>", unsafe_allow_html=True)
     if c["creditos"]:
         for p in sorted(c["creditos"], key=lambda p: (p["vencimento"] or date.min, p["n"])):
             with st.container(key=f"pc_cr_{c['id']}_{p['n']}"):
@@ -2968,14 +3161,16 @@ def _ficha_permuta(c: dict):
                 if st.button("Alterar", key=f"cr_alt_{c['id']}_{p['n']}", icon=":material/edit:",
                              use_container_width=True):
                     _dlg_valor_permuta(c["id"], p["n"])
-    else:   # permuta das primeiras versões: só o valor total, sem linha própria
+    elif c["permuta"]:   # permuta das primeiras versões: só o valor total, sem linha própria
         with st.container(key=f"pc_cr_{c['id']}_base"):
             st.markdown(_html_valor_permuta(c["criada_em"], total, c["criada_por"]), unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='cx-vazio'>Nenhum valor de permuta.</div>", unsafe_allow_html=True)
     if st.button("Adicionar valor", key="fc_add_cred", icon=":material/add:", use_container_width=True,
                  help="Fechou mais uma permuta com essa pessoa? Põe o valor novo com a data dele."):
         _dlg_valor_permuta(c["id"])
 
-    st.markdown("<div class='fc-grupo'>Retiradas</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='{classe_titulo}'>Retiradas</div>", unsafe_allow_html=True)
     if not c["retiradas"]:
         st.markdown("<div class='cx-vazio'>Nada retirado ainda.</div>", unsafe_allow_html=True)
     for p in sorted(c["retiradas"], key=lambda p: (p["vencimento"] or date.min, p["n"])):
@@ -2987,18 +3182,6 @@ def _ficha_permuta(c: dict):
     if st.button("Adicionar retirada", key="fc_add_ret", icon=":material/add:", use_container_width=True,
                  type="primary" if saldo > 0.005 else "secondary"):
         _dlg_retirada(c["id"])
-
-    # permuta do mesmo cliente cadastrada à parte (antes do "+" dos valores existir)
-    outras = permutas_do_cliente(_cobrancas() or [], c["cliente"], menos=c["id"])
-    if outras:
-        st.markdown(f"<div class='fc-grupo'>Outras permutas de {_e(c['cliente'])}</div>", unsafe_allow_html=True)
-        soma = sum(max(x["saldo"], 0) for x in outras) + max(saldo, 0)
-        _info(f"Somando as {len(outras) + 1} permutas: <b>{formatar_brl(soma)}</b> de saldo para retirar.")
-        for x in sorted(outras, key=lambda x: x["criada_em"] or date.min):
-            if _cartao_toque(f"cc_{x['id']}", f"tq_{x['id']}", f"Abrir permuta de {x['cliente']}",
-                             _html_cliente(x, _hoje())):
-                _abrir_cobranca(x["id"], st.session_state.get("cob_volta", "relatorio"))
-    _botoes_editar_excluir(c)
 
 
 @st.dialog("Valor da permuta")
@@ -3017,6 +3200,12 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                          help="Em branco = continua o mesmo." if p else "Quanto essa nova permuta vale.")
     data = st.date_input("Data da permuta", value=(p["vencimento"] if p else _hoje()), format="DD/MM/YYYY",
                          key=f"{k}_data", help="O dia em que vocês fecharam essa permuta.")
+    # Só na permuta INTEIRA o "Valor Total" é a soma dos valores. Na híbrida ele é o combinado de tudo
+    # (Pix, cartão e permuta) e não muda sozinho, igual quando se altera uma parcela (pedido 06/11).
+    inteira = c["permuta"]
+    if not inteira:
+        _info("Isto muda só a parte da permuta. O total combinado da cobrança continua o mesmo: "
+              "se ele mudou, ajuste em <b>Editar dados</b>.", "cx-nota")
     if st.button("Salvar", type="primary", key=f"{k}_ok", use_container_width=True, icon=":material/check:"):
         if not data or not ok_v or (p is None and not valor) or (valor is not None and valor <= 0):
             st.error("Preencha o valor e a data.")
@@ -3030,7 +3219,7 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
             else:
                 proximo = proximo_numero(c["parcelas"])
                 linha = {"Status": STATUS_PAGA, "Forma": TIPO_CREDITO, "Marcado por": _usuario()}
-                if not c["creditos"] and total > 0:
+                if inteira and not c["creditos"] and total > 0:
                     # permuta antiga (só com o total): o total vira o 1º valor, na data do cadastro
                     base = c["criada_em"] or _hoje()
                     b.adicionar_parcela(cid, {**linha, "Nº": proximo, "Vencimento": base, "Pago em": base,
@@ -3039,7 +3228,8 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                 b.adicionar_parcela(cid, {**linha, "Nº": proximo, "Vencimento": data, "Pago em": data,
                                           "Valor": valor})
                 novo_total = total + valor
-            b.atualizar_cobranca(cid, {"Valor Total": novo_total})   # "Valor Total" acompanha a soma
+            if inteira:
+                b.atualizar_cobranca(cid, {"Valor Total": novo_total})   # "Valor Total" acompanha a soma
         except Exception as e:
             st.error(f"Não consegui salvar: {_erro_curto(e)}")
             return
@@ -3054,7 +3244,8 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                 st.rerun(scope="fragment")
         else:
             _info(f"Remover o valor de {formatar_brl(p['valor'])} ({data_br(p['vencimento'])})? "
-                  "Ele sai do total e do saldo.", "cx-perigo")
+                  + ("Ele sai do total e do saldo." if inteira else "Ele sai do total e do saldo da permuta."),
+                  "cx-perigo")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Não", key=f"{k}_rm_nao", use_container_width=True):
@@ -3065,7 +3256,8 @@ def _dlg_valor_permuta(cid: str, n: int | None = None):
                     st.session_state[f"{k}_rm"] = False
                     try:
                         _banco().remover_parcela(cid, n)
-                        _banco().atualizar_cobranca(cid, {"Valor Total": total - p["valor"]})
+                        if inteira:
+                            _banco().atualizar_cobranca(cid, {"Valor Total": total - p["valor"]})
                     except Exception as e:
                         st.error(f"Não consegui remover: {_erro_curto(e)}")
                         return
@@ -3161,8 +3353,11 @@ def tela_excluidas():
             quando = f"Excluída em {data_br(c['excluida_em'])}" if c["excluida_em"] else "Excluída"
             st.markdown(
                 f"<div class='lx-nome'>{_e(c['cliente'])}</div>"
-                f"<div class='lx-meta'>{_e(c['turma'])} · {_e(c['tipo'])} · pago {formatar_brl(c['pago'])}"
-                f" · falta {formatar_brl(c['falta'])}</div><div class='lx-prazo'>{quando}</div>",
+                f"<div class='lx-meta'>{_e(c['turma'])} · {_e(_nome_tipo(c))} · pago {formatar_brl(c['pago'])}"
+                f" · falta {formatar_brl(c['falta'])}"
+                + (f" · saldo da permuta {formatar_brl(max(c['saldo'], 0))}" if c["com_permuta"] and not c["permuta"]
+                   else "")
+                + f"</div><div class='lx-prazo'>{quando}</div>",
                 unsafe_allow_html=True)
             if st.button("Restaurar", key=f"lxr_{c['id']}", icon=":material/restore:"):
                 try:

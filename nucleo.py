@@ -49,7 +49,11 @@ TIPO_HIBRIDO = "Híbrido"                  # parte no Pix, parte no cartão
 TIPO_PERMUTA = "Permuta"                  # treinamento trocado por produtos/serviços (saldo a retirar)
 TIPO_CREDITO = "Crédito de permuta"       # Forma da linha que SOMA saldo numa permuta (valor + data)
 TIPOS        = [TIPO_PIX, TIPO_CARTAO, TIPO_HIBRIDO, TIPO_PERMUTA]
-FORMAS       = [TIPO_PIX, TIPO_CARTAO]    # forma de UMA parcela (nunca "Híbrido")
+FORMAS       = [TIPO_PIX, TIPO_CARTAO]    # forma de UMA parcela em dinheiro (nunca "Híbrido")
+# O que pode entrar numa cobrança híbrida (pedido 06/11: Pix + permuta, por exemplo). A parte da
+# permuta são as mesmas linhas de uma permuta (valores que entram + retiradas), dentro da cobrança.
+FORMAS_HIBRIDO = [TIPO_PIX, TIPO_CARTAO, TIPO_PERMUTA]
+LINHAS_PERMUTA = (TIPO_CREDITO, TIPO_PERMUTA)   # Forma das linhas de permuta (não são dinheiro)
 
 STATUS_PAGA = "Paga"   # coluna Status da parcela; vazio = em aberto
 
@@ -335,19 +339,26 @@ def parcelas_cartao(ja_pago: float, hoje: date, valores: list[float],
 def parcelas_hibrido(entrada: float, data_entrada: date | None, valores_pix: list[float],
                      datas_pix: list[date], valores_cartao: list[float], datas_cartao: list[date],
                      vezes: list[int] | None, ja_passou: list[bool] | None, hoje: date,
-                     pix_pagas: list[bool] | None = None) -> list[dict]:
+                     pix_pagas: list[bool] | None = None, creditos: list = (), retiradas: list = (),
+                     quem: str = "") -> list[dict]:
     """
     Linhas de uma cobrança híbrida nova: a parte do Pix (entrada Nº 0 + parcelas)
     e, continuando a numeração, cada passada do cartão. Toda linha leva a Forma.
     `ja_passou[k]` = aquela passada já foi feita: entra como paga na data dela
     (igual à entrada do Pix, que entra paga quando a data já chegou); `pix_pagas`
     faz o mesmo com as parcelas do Pix.
+    Parte na permuta (pedido 06/11): `creditos` [(data, valor)] e `retiradas` [(produto, data, valor)]
+    viram as mesmas linhas de uma permuta (parcelas_permuta), continuando a numeração.
+    Qualquer parte pode faltar (Pix + permuta não tem cartão; cartão + permuta não tem Pix).
     """
     linhas = [{**l, "Forma": TIPO_PIX}
               for l in parcelas_pix(entrada, data_entrada, valores_pix, datas_pix, hoje, pix_pagas)]
     depois_do_pix = len(valores_pix)
     for l in parcelas_cartao(0, hoje, valores_cartao, datas_cartao, vezes, ja_passou):
         linhas.append({**l, "Nº": depois_do_pix + l["Nº"], "Forma": TIPO_CARTAO})
+    if creditos or retiradas:
+        depois = max((l["Nº"] for l in linhas), default=0)
+        linhas += [{**l, "Nº": depois + l["Nº"]} for l in parcelas_permuta(retiradas, quem, creditos)]
     return linhas
 
 
@@ -497,33 +508,41 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
         ps = sorted((_parcela(p, gravado) for p in por_id.get(cid, [])), key=lambda p: p["n"])
         permuta = gravado == TIPO_PERMUTA
         if permuta:
-            # linha de uma permuta = valor que entrou (crédito) ou retirada; as duas já aconteceram
+            # na permuta inteira, toda linha que não é valor que entrou é retirada
             for p in ps:
-                p["paga"] = True
                 if p["tipo"] != TIPO_CREDITO:
                     p["tipo"] = TIPO_PERMUTA
-            tipo, hibrida = TIPO_PERMUTA, False
+        # Linhas de permuta (a permuta inteira, ou a parte de permuta de uma híbrida, pedido 06/11):
+        # valor que entrou (crédito) ou retirada; as duas já aconteceram e NÃO são dinheiro.
+        parte_perm = [p for p in ps if p["tipo"] in LINHAS_PERMUTA]
+        for p in parte_perm:
+            p["paga"] = True
+        dinheiro = [p for p in ps if p["tipo"] in FORMAS]
+        if permuta:
+            formas, tipo, hibrida = [TIPO_PERMUTA], TIPO_PERMUTA, False
         else:
-            # A forma da cobrança sai das parcelas: as duas formas juntas = híbrida.
-            formas = {p["tipo"] for p in ps}
-            tipo = TIPO_HIBRIDO if len(formas) > 1 else (formas.pop() if formas else gravado)
-            hibrida = tipo == TIPO_HIBRIDO
+            # A forma da cobrança sai das parcelas: mais de uma forma junta = híbrida
+            # (Pix + cartão, Pix + permuta, cartão + permuta ou as três).
+            formas = ([f for f in FORMAS if any(p["tipo"] == f for p in dinheiro)]
+                      + ([TIPO_PERMUTA] if parte_perm else []))
+            hibrida = len(formas) > 1
+            tipo = TIPO_HIBRIDO if hibrida else (formas[0] if formas else gravado)
         # "Parcela 3 de 10" conta pela POSIÇÃO, não pelo Nº gravado: se uma
         # parcela do meio for removida, as outras não ficam com buraco.
         # Na híbrida a conta é separada por forma ("Pix 2 de 3", "Cartão 1 de 2").
-        por_forma_n = {f: sum(1 for p in ps if p["n"] > 0 and p["tipo"] == f) for f in FORMAS}
+        por_forma_n = {f: sum(1 for p in dinheiro if p["n"] > 0 and p["tipo"] == f) for f in FORMAS}
         total_n = sum(por_forma_n.values())
         posicao = {f: 0 for f in FORMAS}
         geral = 0
         for p in ps:
             p["situacao"] = situacao_parcela(p, hoje)
             p["id_cobranca"] = cid
-            if permuta:
+            if p["tipo"] in LINHAS_PERMUTA:
                 if p["tipo"] == TIPO_CREDITO:
                     p["rotulo"] = "Valor da permuta"
                 else:
                     p["rotulo"] = f"Retirada: {p['produto']}" if p["produto"] else "Retirada"
-                p["total_n"] = len(ps)
+                p["total_n"] = len(parte_perm)
                 continue
             if p["n"] > 0:
                 geral += 1
@@ -532,35 +551,43 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             p["rotulo"] = rotulo_parcela(p["tipo"], pos if p["n"] > 0 else 0, de, hibrida)
             p["total_n"] = de
 
-        pago = sum(p["valor"] for p in ps if p["paga"])
-        falta = sum(p["valor"] for p in ps if not p["paga"])
-        atrasadas = [p for p in ps if p["situacao"] == SIT_ATRASADA]
-        abertas = sorted((p for p in ps if not p["paga"] and p["vencimento"]),
+        # Pago, falta, atraso e situação: só o DINHEIRO (Pix e cartão). A permuta tem o saldo dela.
+        pago = sum(p["valor"] for p in dinheiro if p["paga"])
+        falta = sum(p["valor"] for p in dinheiro if not p["paga"])
+        atrasadas = [p for p in dinheiro if p["situacao"] == SIT_ATRASADA]
+        abertas = sorted((p for p in dinheiro if not p["paga"] and p["vencimento"]),
                          key=lambda p: p["vencimento"])
         futuras = [p for p in abertas if p["vencimento"] >= hoje]
-        ultima = max((p["vencimento"] for p in ps if p["vencimento"]), default=None)
+        ultima = max((p["vencimento"] for p in (dinheiro or ps) if p["vencimento"]), default=None)
 
         if atrasadas:
             sit = CLI_ATRASADO
-        elif ps and not abertas and falta == 0:
+        elif dinheiro and not abertas and falta == 0:
             sit = CLI_QUITADO
-        elif any(p["situacao"] == SIT_EM_BREVE for p in ps):
+        elif any(p["situacao"] == SIT_EM_BREVE for p in dinheiro):
             sit = CLI_EM_BREVE
         else:
             sit = CLI_EM_DIA
-        saldo = 0.0
-        creditos = [p for p in ps if p["tipo"] == TIPO_CREDITO]
-        retiradas = [p for p in ps if permuta and p["tipo"] != TIPO_CREDITO]
-        total_permuta = 0.0
+        creditos = [p for p in parte_perm if p["tipo"] == TIPO_CREDITO]
+        retiradas = [p for p in parte_perm if p["tipo"] == TIPO_PERMUTA]
+        retirado = sum(p["valor"] for p in retiradas)
+        # total da permuta = soma dos valores que entraram. Só na permuta INTEIRA sem linha de valor
+        # (as primeiras) vale o "Valor Total"; na híbrida o "Valor Total" é o combinado de tudo.
+        total_permuta = sum(p["valor"] for p in creditos)
+        if permuta and not creditos:
+            total_permuta = valor_para_float(c.get("Valor Total")) or 0.0
+        saldo = (centavos(total_permuta) - centavos(retirado)) / 100 if (permuta or parte_perm) else 0.0
         if permuta:
-            # total = soma dos valores (ou o Valor Total, na permuta sem linha de valor);
             # o que falta é o SALDO para retirar; nunca atrasa (não tem data para cobrar)
-            total_permuta = (sum(p["valor"] for p in creditos) if creditos
-                             else valor_para_float(c.get("Valor Total")) or 0.0)
-            pago = sum(p["valor"] for p in retiradas)
-            saldo = (centavos(total_permuta) - centavos(pago)) / 100
+            pago = retirado
             falta, atrasadas, futuras = max(saldo, 0.0), [], []
             sit = CLI_EM_DIA if centavos(saldo) > 0 else CLI_QUITADO
+        elif parte_perm and not dinheiro:
+            # híbrida que ficou só com a permuta (o Pix e o cartão foram removidos): vale o saldo
+            sit = CLI_EM_DIA if centavos(saldo) > 0 else CLI_QUITADO
+        por_forma = {f: _soma_da_forma(ps, f) for f in FORMAS}
+        por_forma[TIPO_PERMUTA] = {"pago": retirado, "falta": max(saldo, 0.0), "total": total_permuta,
+                                   "n": len(parte_perm), "saldo": saldo}
 
         # Uma turma (o normal) ou várias ("L345, V12"); texto que não é turma fica como está
         turmas = normalizar_turmas(c.get("Turma")) or ([_txt(c.get("Turma"))] if _txt(c.get("Turma")) else [])
@@ -574,13 +601,19 @@ def montar_cobrancas(cobrancas: list[dict], parcelas: list[dict], hoje: date,
             "id": cid,
             "tipo": tipo,
             "hibrida": hibrida,
-            "permuta": permuta,
-            "saldo": saldo,                     # só na permuta: total - retiradas (negativo = passou)
-            "total_permuta": total_permuta,     # só na permuta: soma dos valores que entraram
-            "creditos": creditos,               # só na permuta: cada valor que entrou, com a data
-            "retiradas": retiradas,             # só na permuta: o que já foi pegado
-            # quanto de cada forma: {"Pix": {"pago", "falta", "total", "n"}, "Cartão": {...}}
-            "por_forma": {f: _soma_da_forma(ps, f) for f in FORMAS},
+            "permuta": permuta,                 # a cobrança INTEIRA é permuta (Tipo "Permuta")
+            # formas presentes, nesta ordem: ["Pix"], ["Pix", "Permuta"], ["Pix", "Cartão", "Permuta"]...
+            "formas": formas,
+            "com_permuta": bool(permuta or parte_perm),   # permuta inteira OU híbrida com parte na permuta
+            # da permuta (inteira ou a parte de uma híbrida):
+            "saldo": saldo,                     # total - retiradas (negativo = passou)
+            "total_permuta": total_permuta,     # soma dos valores que entraram
+            "retirado": retirado,               # soma das retiradas
+            "creditos": creditos,               # cada valor que entrou, com a data
+            "retiradas": retiradas,             # o que já foi pegado
+            # quanto de cada forma: {"Pix": {"pago", "falta", "total", "n"}, "Cartão": {...},
+            # "Permuta": {..., "saldo"}} (na permuta, "pago" = retirado e "falta" = saldo)
+            "por_forma": por_forma,
             "cliente": _txt(c.get("Cliente")),
             "turma": turma,                     # "L345" ou "L345 + V12"
             "turmas": turmas,                   # ["L345", "V12"]
@@ -718,9 +751,20 @@ def casa_busca(c: dict, termo: str) -> bool:
     notas = " ".join([c.get("observacoes", "")] + [p.get("observacao", "") for p in c.get("parcelas", [])]
                      + [p.get("produto", "") for p in c.get("parcelas", [])])
     tel = c.get("telefone", "")
-    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {c.get('cidade', '')} {notas}"
-                       f" {tel} {digitos_telefone(tel)}")
+    # híbrida com parte na permuta também é achada por "permuta"
+    perm = TIPO_PERMUTA if c.get("com_permuta") and c["tipo"] != TIPO_PERMUTA else ""
+    alvo = chave_busca(f"{c['cliente']} {c['turma']} {c['treinamento']} {c['tipo']} {perm} {c.get('cidade', '')}"
+                       f" {notas} {tel} {digitos_telefone(tel)}")
     return all(palavra in alvo for palavra in chave_busca(termo).split())
+
+
+def casa_forma(c: dict, tipos) -> bool:
+    """
+    Filtro Forma: Pix e Cartão continuam só as cobranças de uma forma só; "Híbrido" = todas as
+    híbridas; "Permuta" = as permutas E as híbridas com parte na permuta (todas têm saldo para
+    retirar, que é o que soma a linha "Saldo para retirar" do relatório).
+    """
+    return c["tipo"] in tipos or (TIPO_PERMUTA in tipos and bool(c.get("com_permuta")))
 
 
 def filtrar(cobs: list[dict], termo: str = "", situacoes=None, tipos=None,
@@ -733,7 +777,7 @@ def filtrar(cobs: list[dict], termo: str = "", situacoes=None, tipos=None,
             continue
         if situacoes and c["situacao"] not in situacoes:
             continue
-        if tipos and c["tipo"] not in tipos:
+        if tipos and not casa_forma(c, tipos):
             continue
         if treinamentos and not any(t in treinamentos for t in c.get("treinamentos", [c["treinamento"]])):
             continue
@@ -767,9 +811,11 @@ def agenda(cobs: list[dict], de: date, ate: date, com_atrasadas: bool = True) ->
 
 
 def resumo(cobs: list[dict]) -> dict:
-    """Totais do topo do relatório. Permuta não é dinheiro: tem a sua própria conta (saldo a retirar)."""
+    """Totais do topo do relatório. Permuta não é dinheiro: tem a sua própria conta (saldo a retirar).
+    Na híbrida com parte na permuta, o Pix e o cartão entram no dinheiro e a parte da permuta,
+    no saldo para retirar (pedido 06/11)."""
     dinheiro = [c for c in cobs if not c.get("permuta")]
-    permutas = [c for c in cobs if c.get("permuta")]
+    permutas = [c for c in cobs if c.get("com_permuta", c.get("permuta"))]
     return {
         "recebido": sum(c["pago"] for c in dinheiro),
         "a_receber": sum(c["falta"] for c in dinheiro),

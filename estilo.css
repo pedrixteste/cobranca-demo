@@ -178,6 +178,15 @@ header[data-testid="stHeader"] { display: none; }
 /* híbrido = as duas formas juntas: metade azul do Pix, metade rosa do cartão */
 .tp-hib    { background: linear-gradient(90deg, var(--pix-bg) 0 50%, var(--cartao-bg) 50% 100%); color: var(--tinta); }
 .tp-perm   { background: var(--permuta-bg); color: var(--permuta); }
+/* híbrido com permuta (pedido 06/11): uma faixa da cor de cada forma que a cobrança tem */
+.tp-hib.hb-px-pm { background: linear-gradient(90deg, var(--pix-bg) 0 50%, var(--permuta-bg) 50% 100%); }
+.tp-hib.hb-ct-pm { background: linear-gradient(90deg, var(--cartao-bg) 0 50%, var(--permuta-bg) 50% 100%); }
+.tp-hib.hb-tres  { background: linear-gradient(90deg, var(--pix-bg) 0 34%, var(--cartao-bg) 34% 67%,
+                                               var(--permuta-bg) 67% 100%); }
+/* saldo da parte na permuta, no cartão do relatório */
+.cc-sp, .cc-val .cc-sp b { color: var(--permuta); }
+[class*="st-key-hb_pm_ret_"] { border-left: 3px solid var(--permuta-bg); padding-left: 10px; }
+[class*="st-key-hb_pm_cred_"] { border-left: 3px solid var(--permuta); padding-left: 10px; }
 
 /* Permuta: linha do saldo no topo do relatório, retiradas na ficha e o "Saldo" em destaque */
 .rs-perm { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: .8rem; color: var(--apoio);

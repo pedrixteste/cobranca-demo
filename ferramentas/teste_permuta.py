@@ -190,13 +190,16 @@ with sync_playwright() as p:
     confere("cartão da permuta mostra saldo e quanto já foi retirado do total",
             any("saldo R$ 5.700,00" in x and "Retirado R$ 1.300,00 de R$ 7.000,00" in x for x in cards), str(cards)[:300])
     rs = page.locator(".rs-perm").inner_text().replace("\n", " ")
-    confere("topo: saldo das permutas separado do dinheiro", "Saldo para retirar" in rs and "2 permutas" in rs, rs)
+    confere("topo: saldo das permutas separado do dinheiro", "Saldo para retirar" in rs and "3 permutas" in rs, rs)   # + a parte da permuta da FLORICULTURA (híbrida, 06/11)
     page.screenshot(path=str(OUT / "permuta_4_relatorio.png"), full_page=True)
     page.get_by_text("Filtros", exact=True).first.click(); esperar(page)
     page.locator("[data-testid=stExpander] button", has_text="Permuta").first.click(); esperar(page)
     topo = page.locator(".rs").inner_text().replace("\n", " ")
-    confere("filtro Permuta: só permutas, fora do Recebido/A receber",
-            page.locator(".cc").count() == 2 and topo.count("R$0,00") == 3, topo)
+    # 3 = as 2 permutas + a FLORICULTURA (híbrida Pix + permuta, 06/11): no dinheiro entra só o Pix dela
+    # (recebido 1.000 da entrada, a receber 4.000); as permutas ficam fora do Recebido/A receber
+    confere("filtro Permuta: permutas + híbrida com permuta, no dinheiro só o Pix da híbrida",
+            page.locator(".cc").count() == 3 and "R$1.000,00" in topo and "R$4.000,00" in topo
+            and topo.count("R$0,00") == 1, topo)
     page.locator("[data-testid=stExpander] button", has_text="Permuta").first.click(); esperar(page)
     por(page, "Buscar", "brindes")
     confere("busca pelo produto retirado acha a permuta",
